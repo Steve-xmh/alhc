@@ -15,11 +15,11 @@ windows-sys = { version = "0.42.0", features = [
 ]}
 
 [dev-dependencies]
-futures = "0.3.25"
 pollster = "0.2.5"
 
 [dependencies]
-futures-io = "0.3.25"
+futures = "0.3.25"
+pin-project-lite = "0.2.9"
 
 [profile.release]
 lto = true

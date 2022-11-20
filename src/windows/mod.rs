@@ -1,14 +1,22 @@
 use std::{
     collections::HashMap,
     ffi::{c_void, OsStr, OsString},
+    io::ErrorKind,
     os::windows::ffi::{OsStrExt, OsStringExt},
+    pin::Pin,
     ptr::slice_from_raw_parts,
     sync::{Arc, Mutex},
-    task::{Poll, Waker}, pin::Pin,
+    task::{Poll, Waker},
 };
 
-use futures_io::{AsyncBufRead, AsyncRead};
+use futures::{
+    io::{AsyncRead, Cursor, Read},
+    FutureExt,
+};
+use std::future::Future;
 use windows_sys::Win32::{Foundation::GetLastError, Networking::WinHttp::*};
+
+use crate::Method;
 
 trait ToWide {
     fn to_utf16(self) -> Vec<u16>;
@@ -20,32 +28,143 @@ impl ToWide for &str {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ClientBuilder {}
-
 #[derive(Debug)]
 pub struct Client {
     h_session: *mut c_void,
     connections: Mutex<HashMap<String, Arc<Connection>>>,
 }
 
-#[derive(Debug)]
-pub struct Request {
-    connection: Arc<Connection>,
-    h_request: *mut c_void,
+pin_project_lite::pin_project! {
+    pub struct Request {
+        connection: Arc<Connection>,
+        h_request: *mut c_void,
+        waker: Option<Waker>,
+        #[pin]
+        body: Box<dyn AsyncRead + Unpin + 'static>,
+        body_len: usize,
+        buf: [u8; 32],
+        state: ResponseState,
+    }
 }
 
 impl Request {
-    pub fn send(self) -> Response {
-        // self.h_request = std::ptr::null_mut(); // Avoid being dropped
-        Response {
-            connection: self.connection,
-            state: ResponseState::Init,
-            h_request: self.h_request,
-            waker: None,
-            buf_size: 0,
-            read_size: 0,
-            buf: [0; 256],
+    pub fn body(mut self, body: impl AsyncRead + Unpin + 'static, body_size: usize) -> Self {
+        self.body_len = body_size;
+        self.body = Box::new(body);
+        self
+    }
+
+    pub fn body_string(mut self, body: String) -> Self {
+        self.body_len = body.len();
+        self.body = Box::new(Cursor::new(body));
+        self
+    }
+
+    pub fn body_bytes(mut self, body: Vec<u8>) -> Self {
+        self.body_len = body.len();
+        self.body = Box::new(Cursor::new(body));
+        self
+    }
+
+    pub fn header(self, header: &str, value: &str) -> Self {
+        let headers = format!("{}:{}", header, value);
+        let headers = headers.to_utf16().as_ptr();
+
+        unsafe {
+            WinHttpAddRequestHeaders(
+                self.h_request,
+                headers,
+                u32::MAX,
+                WINHTTP_ADDREQ_FLAG_ADD
+            );
+        }
+
+        self
+    }
+
+    pub fn replace_header(self, header: &str, value: &str) -> Self {
+        let headers = format!("{}:{}", header, value);
+        let headers = headers.to_utf16().as_ptr();
+
+        unsafe {
+            WinHttpAddRequestHeaders(
+                self.h_request,
+                headers,
+                u32::MAX,
+                WINHTTP_ADDREQ_FLAG_REPLACE,
+            );
+        }
+
+        self
+    }
+}
+
+impl Future for Request {
+    type Output = futures::io::Result<Response>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        if self.waker.is_none() {
+            self.waker = Some(cx.waker().to_owned());
+        }
+        match self.state {
+            ResponseState::Init => {
+                // println!("Sending request");
+                unsafe {
+                    let _send_result = WinHttpSendRequest(
+                        self.h_request,
+                        std::ptr::null(),
+                        0,
+                        std::ptr::null(),
+                        0,
+                        self.body_len as _,
+                        &mut self as *mut _ as usize,
+                    ); // TODO: Error handling
+                }
+                self.state = ResponseState::SendingBody;
+                Poll::Pending
+            }
+            ResponseState::SendingBody => {
+                let project = self.project();
+                match project.body.poll_read(cx, project.buf) {
+                    Poll::Ready(Ok(size)) => {
+                        // println!("Reading body {}", size);
+                        if size == 0 {
+                            // All body has read, waiting last block send
+                            *project.state = ResponseState::BodySent;
+                            cx.waker().wake_by_ref();
+                        } else {
+                            unsafe {
+                                let h_request = *project.h_request;
+                                let buf = project.buf.as_ptr();
+                                WinHttpWriteData(
+                                    h_request,
+                                    buf as *const c_void,
+                                    size as _,
+                                    std::ptr::null_mut(),
+                                ); // TODO: Error handling
+                            }
+                        }
+                        Poll::Pending
+                    }
+                    Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+            ResponseState::BodySent => {
+                // All body is sent, return the response and start read http response
+                #[cfg(debug_assertions)]
+                println!("Body sent");
+                Poll::Ready(Ok(Response {
+                    connection: self.connection.clone(),
+                    state: ResponseState::Init,
+                    h_request: self.h_request,
+                    waker: None,
+                    buf_size: 0,
+                    read_size: 0,
+                    buf: [0; 32],
+                }))
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -53,19 +172,19 @@ impl Request {
 #[derive(Debug)]
 enum ResponseState {
     Init,
+    SendingBody,
+    BodySent,
     ReceivingData,
     FinishedData,
 }
 
-#[derive(Debug)]
-pub struct Response{
+pub struct Response {
     connection: Arc<Connection>,
     state: ResponseState,
     waker: Option<Waker>,
     buf_size: usize,
     read_size: usize,
-    buf: [u8; 256],
-
+    buf: [u8; 32],
     h_request: *mut c_void,
 }
 
@@ -74,26 +193,27 @@ impl AsyncRead for Response {
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut [u8],
-    ) -> Poll<futures_io::Result<usize>> {
+    ) -> Poll<futures::io::Result<usize>> {
         if self.waker.is_none() {
             self.waker = Some(cx.waker().to_owned());
         }
         match self.state {
             ResponseState::Init => {
                 unsafe {
-                    let _send_result = WinHttpSendRequest(
+                    let dw_context = &mut self as *mut _;
+                    WinHttpSetOption(
                         self.h_request,
-                        std::ptr::null(),
-                        0,
-                        std::ptr::null(),
-                        0,
-                        0,
-                        &mut self as *mut _ as usize,
-                    );
+                        WINHTTP_OPTION_CONTEXT_VALUE,
+                        &dw_context as *const _ as *const c_void,
+                        std::mem::size_of::<*const c_void>() as _,
+                    ); // TODO: Error handling
+                    WinHttpReceiveResponse(self.h_request, std::ptr::null_mut());
                 }
                 self.state = ResponseState::ReceivingData;
                 Poll::Pending
             }
+            ResponseState::SendingBody => unreachable!(),
+            ResponseState::BodySent => unreachable!(),
             ResponseState::ReceivingData => unsafe {
                 if self.buf_size <= self.read_size {
                     self.read_size = 0;
@@ -103,25 +223,31 @@ impl AsyncRead for Response {
                         self.buf.len() as _,
                         std::ptr::null_mut(),
                     );
-                    WinHttpQueryDataAvailable(
-                        self.h_request,
-                        std::ptr::null_mut()
-                    );
+                    WinHttpQueryDataAvailable(self.h_request, std::ptr::null_mut());
                     Poll::Pending
                 } else {
-                    let read_size = self.buf_size.min(buf.len()).min(self.buf_size - self.read_size);
-                    buf[..read_size].copy_from_slice(&self.buf[self.read_size..self.read_size + read_size]);
+                    let read_size = self
+                        .buf_size
+                        .min(buf.len())
+                        .min(self.buf_size - self.read_size);
+                    buf[..read_size]
+                        .copy_from_slice(&self.buf[self.read_size..self.read_size + read_size]);
                     self.read_size += read_size;
                     Poll::Ready(Ok(read_size))
                 }
             },
             ResponseState::FinishedData => unsafe {
                 if self.buf_size <= self.read_size {
+                    #[cfg(debug_assertions)]
                     println!("Finished Data, returning");
                     Poll::Ready(Ok(0))
                 } else {
-                    let read_size = self.buf_size.min(buf.len()).min(self.buf_size - self.read_size);
-                    buf[..read_size].copy_from_slice(&self.buf[self.read_size..self.read_size + read_size]);
+                    let read_size = self
+                        .buf_size
+                        .min(buf.len())
+                        .min(self.buf_size - self.read_size);
+                    buf[..read_size]
+                        .copy_from_slice(&self.buf[self.read_size..self.read_size + read_size]);
                     self.read_size += read_size;
                     WinHttpReadData(
                         self.h_request,
@@ -129,10 +255,7 @@ impl AsyncRead for Response {
                         self.buf.len() as _,
                         std::ptr::null_mut(),
                     );
-                    WinHttpQueryDataAvailable(
-                        self.h_request,
-                        std::ptr::null_mut()
-                    );
+                    WinHttpQueryDataAvailable(self.h_request, std::ptr::null_mut());
                     Poll::Ready(Ok(read_size))
                 }
             },
@@ -146,8 +269,16 @@ pub(crate) struct Connection {
 }
 
 impl Client {
-    // pub fn request
     pub fn get(&self, url: &str) -> Request {
+        self.request(Method::GET, url)
+    }
+
+    pub fn post(&self, url: &str) -> Request {
+        self.request(Method::POST, url)
+    }
+
+    // pub fn request
+    pub fn request(&self, method: Method, url: &str) -> Request {
         unsafe {
             let url = url.to_utf16();
 
@@ -160,7 +291,7 @@ impl Client {
                 ..std::mem::zeroed()
             };
 
-            let result = WinHttpCrackUrl(url.as_ptr(), 0, 0, &mut component);
+            let result = WinHttpCrackUrl(url.as_ptr(), 0, 0, &mut component); // TODO: Error handling
 
             // dbg!(result);
 
@@ -184,7 +315,7 @@ impl Client {
 
             let h_request = WinHttpOpenRequest(
                 conn.h_connection,
-                std::ptr::null(),
+                method.as_raw_str_wide(),
                 url_path_w.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
@@ -201,33 +332,53 @@ impl Client {
 
             Request {
                 connection: conn,
+                body: Box::new(futures::io::empty()),
+                body_len: 0,
+                state: ResponseState::Init,
                 h_request,
+                buf: [0; 32],
+                waker: None,
             }
+            .header("User-Agent", "alhc/0.1")
         }
     }
 
     pub(crate) fn get_or_connect_connection(&self, hostname: &str) -> Arc<Connection> {
+        // unsafe {
+        //     let mut connections = self.connections.lock().unwrap();
+        //     if let Some(conn) = connections.get(hostname).cloned() {
+        //         conn
+        //     } else {
+        //         let hostname_w = hostname.to_utf16();
+        //         let h_connection = WinHttpConnect(
+        //             self.h_session,
+        //             hostname_w.as_ptr(),
+        //             INTERNET_DEFAULT_PORT,
+        //             0,
+        //         );
+        //         let conn = Arc::new(Connection { h_connection });
+
+        //         connections.insert(hostname.to_owned(), conn.clone());
+
+        //         conn
+        //     }
+        // }
         unsafe {
-            let mut connections = self.connections.lock().unwrap();
-            if let Some(conn) = connections.get(hostname).cloned() {
-                conn
-            } else {
-                let hostname_w = hostname.to_utf16();
-                let h_connection = WinHttpConnect(
-                    self.h_session,
-                    hostname_w.as_ptr(),
-                    INTERNET_DEFAULT_PORT,
-                    0,
-                );
-                let conn = Arc::new(Connection { h_connection });
-
-                connections.insert(hostname.to_owned(), conn.clone());
-
-                conn
-            }
+            let hostname_w = hostname.to_utf16();
+            let h_connection = WinHttpConnect(
+                self.h_session,
+                hostname_w.as_ptr(),
+                INTERNET_DEFAULT_PORT,
+                0,
+            );
+            
+            Arc::new(Connection { h_connection })
         }
     }
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct ClientBuilder {}
 
 impl ClientBuilder {
     pub fn build(self) -> Client {
@@ -254,43 +405,63 @@ unsafe extern "system" fn status_callback(
     lpv_status_infomation: *mut c_void,
     dw_status_infomation_length: u32,
 ) {
+    let request = dw_context as *mut std::pin::Pin<&mut Request>;
+    let request = request.as_mut().unwrap();
+
     let response = dw_context as *mut std::pin::Pin<&mut Response>;
     let response = response.as_mut().unwrap();
 
     match dw_internet_status {
         WINHTTP_CALLBACK_STATUS_RESOLVING_NAME => {
-            // println!("Resolving name");
+            #[cfg(debug_assertions)]
+            println!("Resolving name");
         }
         WINHTTP_CALLBACK_STATUS_NAME_RESOLVED => {
-            // println!("Name resolved");
+            #[cfg(debug_assertions)]
+            println!("Name resolved");
         }
         WINHTTP_CALLBACK_STATUS_CONNECTING_TO_SERVER => {
-            // println!("Connecting to server");
+            #[cfg(debug_assertions)]
+            println!("Connecting to server");
         }
         WINHTTP_CALLBACK_STATUS_CONNECTED_TO_SERVER => {
-            // println!("Connected to server");
+            #[cfg(debug_assertions)]
+            println!("Connected to server");
         }
         WINHTTP_CALLBACK_STATUS_SENDING_REQUEST => {
-            // println!("Sending request");
+            #[cfg(debug_assertions)]
+            println!("Sending request");
         }
         WINHTTP_CALLBACK_STATUS_REQUEST_SENT => {
-            // println!("Request sent");
+            #[cfg(debug_assertions)]
+            println!("Request sent");
         }
         WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE => {
-            // println!("Send request complete");
-            WinHttpReceiveResponse(
-                response.h_request,
-                std::ptr::null_mut()
-            ); // TODO: Error handling
+            #[cfg(debug_assertions)]
+            println!("Send request complete");
+            // Send body data
+            if let Some(waker) = &request.waker {
+                waker.wake_by_ref();
+            }
+        }
+        WINHTTP_CALLBACK_STATUS_WRITE_COMPLETE => {
+            #[cfg(debug_assertions)]
+            println!("Write complete");
+            if let Some(waker) = &request.waker {
+                waker.wake_by_ref();
+            }
         }
         WINHTTP_CALLBACK_STATUS_RECEIVING_RESPONSE => {
-            // println!("Receiving response");
+            #[cfg(debug_assertions)]
+            println!("Receiving response");
         }
         WINHTTP_CALLBACK_STATUS_RESPONSE_RECEIVED => {
-            // println!("Response received");
+            #[cfg(debug_assertions)]
+            println!("Response received");
         }
         WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE => {
-            // println!("Headers available");
+            #[cfg(debug_assertions)]
+            println!("Headers available");
             let mut header_size = 0;
             WinHttpQueryHeaders(
                 response.h_request,
@@ -319,40 +490,48 @@ unsafe extern "system" fn status_callback(
                 .to_string_lossy()
                 .to_string();
 
-            WinHttpQueryDataAvailable(
-                response.h_request,
-                std::ptr::null_mut()
-            );
+            WinHttpQueryDataAvailable(response.h_request, std::ptr::null_mut());
 
             // println!("Header data: {}", header_data);
         }
         WINHTTP_CALLBACK_STATUS_CONNECTION_CLOSED => {
-            // println!("Connection Closed: {}", dw_status_infomation_length);
+            #[cfg(debug_assertions)]
+            println!("Connection Closed: {}", dw_status_infomation_length);
             if let Some(waker) = &response.waker {
                 waker.wake_by_ref();
             }
         }
         WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE => {
             let size = *(lpv_status_infomation as *mut u32);
-            // println!("Data available: {}", size);
+            #[cfg(debug_assertions)]
+            println!("Data available: {}", size);
             if size == 0 {
                 // All data are received
                 response.state = ResponseState::FinishedData;
-                // println!("All data received");
+                #[cfg(debug_assertions)]
+                println!("All data received");
             }
             if let Some(waker) = &response.waker {
                 waker.wake_by_ref();
             }
         }
         WINHTTP_CALLBACK_STATUS_READ_COMPLETE => {
-            // println!("Read complete available: {:016X} {}", lpv_status_infomation as usize, dw_status_infomation_length);
+            #[cfg(debug_assertions)]
+            println!(
+                "Read complete available: {:016X} {}",
+                lpv_status_infomation as usize, dw_status_infomation_length
+            );
             response.buf_size = dw_status_infomation_length as usize;
             if let Some(waker) = &response.waker {
                 waker.wake_by_ref();
             }
         }
+        WINHTTP_CALLBACK_STATUS_REQUEST_ERROR => {
+            
+        }
         other => {
-            // println!("Unknown status: {:08X}", other);
+            #[cfg(debug_assertions)]
+            println!("Unknown status: {:08X}", other);
         }
     }
 }
@@ -360,7 +539,7 @@ unsafe extern "system" fn status_callback(
 impl Drop for Client {
     fn drop(&mut self) {
         unsafe {
-            // println!("Droping client");
+            println!("Droping client");
             WinHttpCloseHandle(self.h_session);
         }
     }
@@ -369,7 +548,7 @@ impl Drop for Client {
 impl Drop for Connection {
     fn drop(&mut self) {
         unsafe {
-            // println!("Droping connection");
+            println!("Droping connection");
             WinHttpCloseHandle(self.h_connection);
         }
     }

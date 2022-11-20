@@ -28,27 +28,19 @@ impl Method {
             Method::OPTIONS => "OPTIONS",
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use futures::AsyncReadExt;
-    use pollster::FutureExt as _;
-
-    use crate::windows::ClientBuilder;
-
-    #[test]
-    fn it_works() {
-        async {
-            let client = ClientBuilder::default().build();
-            let mut result = vec![];
-            let res = client
-                .get("https://piston-meta.mojang.com/mc/game/version_manifest.json")
-                .send()
-                .read_to_end(&mut result)
-                .await;
-            let _ = dbg!(res);
-        }
-        .block_on()
+    
+    // For windows only
+    pub(crate) fn as_raw_str_wide(&self) -> *const u16 {
+        let data: &[u16] = match self {
+            Method::GET => &[71, 69, 84, 0],
+            Method::POST => &[80, 79, 83, 84, 0],
+            Method::HEAD => &[72, 69, 65, 68, 0],
+            Method::PUT => &[80, 85, 84, 0],
+            Method::TRACE => &[84, 82, 65, 67, 69, 0],
+            Method::DELETE => &[68, 69, 76, 69, 84, 69, 0],
+            Method::CONNECT => &[67, 79, 78, 78, 69, 67, 84, 0],
+            Method::OPTIONS => &[79, 80, 84, 73, 79, 78, 83, 0],
+        };
+        data.as_ptr()
     }
 }
