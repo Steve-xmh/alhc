@@ -28,7 +28,7 @@ impl Method {
             Method::OPTIONS => "OPTIONS",
         }
     }
-    
+
     // For windows only
     pub(crate) fn as_raw_str_wide(&self) -> *const u16 {
         let data: &[u16] = match self {

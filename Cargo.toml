@@ -20,11 +20,3 @@ pollster = "0.2.5"
 [dependencies]
 futures = "0.3.25"
 pin-project-lite = "0.2.9"
-
-[profile.release]
-lto = true
-codegen-units = 1
-panic = "abort"
-opt-level = "z"
-debug = false
-strip = true

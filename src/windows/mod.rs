@@ -1,8 +1,11 @@
 use std::{
     collections::HashMap,
-    ffi::{c_void, OsStr, OsString},
+    ffi::{c_void, OsString},
+    fmt::Debug,
     io::ErrorKind,
-    os::windows::ffi::{OsStrExt, OsStringExt},
+    marker::PhantomPinned,
+    ops::Deref,
+    os::windows::ffi::OsStringExt,
     pin::Pin,
     ptr::slice_from_raw_parts,
     sync::{Arc, Mutex},
@@ -10,8 +13,8 @@ use std::{
 };
 
 use futures::{
-    io::{AsyncRead, Cursor, Read},
-    FutureExt,
+    io::{AsyncRead, Cursor},
+    AsyncReadExt,
 };
 use std::future::Future;
 use windows_sys::Win32::{Foundation::GetLastError, Networking::WinHttp::*};
@@ -30,20 +33,40 @@ impl ToWide for &str {
 
 #[derive(Debug)]
 pub struct Client {
-    h_session: *mut c_void,
-    connections: Mutex<HashMap<String, Arc<Connection>>>,
+    h_session: Handle,
+    connections: Mutex<HashMap<String, Arc<Handle>>>,
+}
+
+#[derive(Debug, Default)]
+struct NetworkContext {
+    waker: Option<Waker>,
+    status: NetworkStatus,
+    buf_size: usize,
+    _pinner: PhantomPinned,
 }
 
 pin_project_lite::pin_project! {
     pub struct Request {
-        connection: Arc<Connection>,
-        h_request: *mut c_void,
-        waker: Option<Waker>,
+        connection: Arc<Handle>,
+        h_request: Arc<Handle>,
         #[pin]
         body: Box<dyn AsyncRead + Unpin + 'static>,
         body_len: usize,
         buf: [u8; 32],
-        state: ResponseState,
+        ctx: Pin<Box<NetworkContext>>,
+        _pinner: PhantomPinned,
+    }
+}
+
+impl Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request")
+            .field("connection", &self.connection)
+            .field("h_request", &self.h_request)
+            .field("body_len", &self.body_len)
+            .field("buf", &self.buf)
+            .field("ctx", &self.ctx)
+            .finish()
     }
 }
 
@@ -71,12 +94,7 @@ impl Request {
         let headers = headers.to_utf16().as_ptr();
 
         unsafe {
-            WinHttpAddRequestHeaders(
-                self.h_request,
-                headers,
-                u32::MAX,
-                WINHTTP_ADDREQ_FLAG_ADD
-            );
+            WinHttpAddRequestHeaders(**self.h_request, headers, u32::MAX, WINHTTP_ADDREQ_FLAG_ADD);
         }
 
         self
@@ -88,7 +106,7 @@ impl Request {
 
         unsafe {
             WinHttpAddRequestHeaders(
-                self.h_request,
+                **self.h_request,
                 headers,
                 u32::MAX,
                 WINHTTP_ADDREQ_FLAG_REPLACE,
@@ -103,38 +121,49 @@ impl Future for Request {
     type Output = futures::io::Result<Response>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        if self.waker.is_none() {
-            self.waker = Some(cx.waker().to_owned());
+        unsafe {
+            let ctx = self.ctx.as_mut().get_unchecked_mut();
+            if ctx.waker.is_none() {
+                ctx.waker = Some(cx.waker().clone());
+            }
         }
-        match self.state {
-            ResponseState::Init => {
+        match self.ctx.status {
+            NetworkStatus::Init => {
+                // #[cfg(debug_assertions)]
                 // println!("Sending request");
                 unsafe {
                     let _send_result = WinHttpSendRequest(
-                        self.h_request,
+                        **self.h_request,
                         std::ptr::null(),
                         0,
                         std::ptr::null(),
                         0,
                         self.body_len as _,
-                        &mut self as *mut _ as usize,
+                        self.ctx.as_mut().get_unchecked_mut() as *mut _ as usize,
                     ); // TODO: Error handling
                 }
-                self.state = ResponseState::SendingBody;
+                // It's safe to modify field
+                unsafe {
+                    self.ctx.as_mut().get_unchecked_mut().status = NetworkStatus::SendingBody;
+                }
                 Poll::Pending
             }
-            ResponseState::SendingBody => {
+            NetworkStatus::SendingBody => {
                 let project = self.project();
                 match project.body.poll_read(cx, project.buf) {
                     Poll::Ready(Ok(size)) => {
-                        // println!("Reading body {}", size);
+                        // println!("Sending body {}", size);
                         if size == 0 {
                             // All body has read, waiting last block send
-                            *project.state = ResponseState::BodySent;
+                            // It's safe to modify field
+                            unsafe {
+                                project.ctx.as_mut().get_unchecked_mut().status =
+                                    NetworkStatus::BodySent;
+                            }
                             cx.waker().wake_by_ref();
                         } else {
                             unsafe {
-                                let h_request = *project.h_request;
+                                let h_request = ***project.h_request;
                                 let buf = project.buf.as_ptr();
                                 WinHttpWriteData(
                                     h_request,
@@ -150,42 +179,96 @@ impl Future for Request {
                     Poll::Pending => Poll::Pending,
                 }
             }
-            ResponseState::BodySent => {
+            NetworkStatus::BodySent => {
                 // All body is sent, return the response and start read http response
-                #[cfg(debug_assertions)]
-                println!("Body sent");
+                // #[cfg(debug_assertions)]
+                // println!("Body sent");
                 Poll::Ready(Ok(Response {
-                    connection: self.connection.clone(),
-                    state: ResponseState::Init,
-                    h_request: self.h_request,
-                    waker: None,
-                    buf_size: 0,
+                    _connection: self.connection.clone(),
+                    ctx: Box::pin(Default::default()),
+                    h_request: self.h_request.clone(),
                     read_size: 0,
                     buf: [0; 32],
                 }))
             }
-            _ => unreachable!(),
+            NetworkStatus::Error(kind) => Poll::Ready(Err(kind.into())),
+            _ => {
+                // println!("[ERROR] Unreachable!");
+                unreachable!()
+            }
         }
     }
 }
 
 #[derive(Debug)]
-enum ResponseState {
+enum NetworkStatus {
     Init,
     SendingBody,
     BodySent,
     ReceivingData,
     FinishedData,
+    Error(ErrorKind),
+}
+
+impl Default for NetworkStatus {
+    fn default() -> Self {
+        Self::Init
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Handle(*mut c_void);
+
+impl From<*mut c_void> for Handle {
+    fn from(h: *mut c_void) -> Self {
+        // println!("Creating handle: {:?}", h);
+        Self(h)
+    }
+}
+
+impl Deref for Handle {
+    type Target = *mut c_void;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        unsafe {
+            // println!("Closing handle: {:?}", self.0);
+            if WinHttpCloseHandle(self.0) == 0 {
+                panic!(
+                    "Can't close handle for {:?}: {:08X}",
+                    self.0,
+                    GetLastError()
+                );
+            }
+        }
+    }
 }
 
 pub struct Response {
-    connection: Arc<Connection>,
-    state: ResponseState,
-    waker: Option<Waker>,
-    buf_size: usize,
+    _connection: Arc<Handle>,
+    ctx: Pin<Box<NetworkContext>>,
     read_size: usize,
     buf: [u8; 32],
-    h_request: *mut c_void,
+    h_request: Arc<Handle>,
+}
+
+impl Response {
+    pub async fn recv_string(mut self) -> std::io::Result<String> {
+        let mut result = String::with_capacity(256);
+        self.read_to_string(&mut result).await?;
+        Ok(result)
+    }
+
+    pub async fn recv_bytes(mut self) -> std::io::Result<Vec<u8>> {
+        let mut result = Vec::with_capacity(256);
+        self.read_to_end(&mut result).await?;
+        Ok(result)
+    }
 }
 
 impl AsyncRead for Response {
@@ -194,78 +277,84 @@ impl AsyncRead for Response {
         cx: &mut std::task::Context<'_>,
         buf: &mut [u8],
     ) -> Poll<futures::io::Result<usize>> {
-        if self.waker.is_none() {
-            self.waker = Some(cx.waker().to_owned());
+        unsafe {
+            let ctx = self.ctx.as_mut().get_unchecked_mut();
+            if ctx.waker.is_none() {
+                ctx.waker = Some(cx.waker().clone());
+            }
         }
-        match self.state {
-            ResponseState::Init => {
+        match self.ctx.status {
+            NetworkStatus::Init => {
                 unsafe {
-                    let dw_context = &mut self as *mut _;
+                    let dw_context = self.ctx.as_mut().get_unchecked_mut() as *mut _;
                     WinHttpSetOption(
-                        self.h_request,
+                        **self.h_request,
                         WINHTTP_OPTION_CONTEXT_VALUE,
                         &dw_context as *const _ as *const c_void,
                         std::mem::size_of::<*const c_void>() as _,
                     ); // TODO: Error handling
-                    WinHttpReceiveResponse(self.h_request, std::ptr::null_mut());
+                    WinHttpReceiveResponse(**self.h_request, std::ptr::null_mut());
                 }
-                self.state = ResponseState::ReceivingData;
+                // #[cfg(debug_assertions)]
+                // println!("Receiving data");
+                // It's safe to modify field
+                unsafe {
+                    self.ctx.as_mut().get_unchecked_mut().status = NetworkStatus::ReceivingData;
+                }
                 Poll::Pending
             }
-            ResponseState::SendingBody => unreachable!(),
-            ResponseState::BodySent => unreachable!(),
-            ResponseState::ReceivingData => unsafe {
-                if self.buf_size <= self.read_size {
+            NetworkStatus::SendingBody => unreachable!(),
+            NetworkStatus::BodySent => unreachable!(),
+            NetworkStatus::ReceivingData => unsafe {
+                if self.ctx.buf_size <= self.read_size {
                     self.read_size = 0;
                     WinHttpReadData(
-                        self.h_request,
+                        **self.h_request,
                         self.buf.as_mut_ptr() as *mut _,
                         self.buf.len() as _,
                         std::ptr::null_mut(),
                     );
-                    WinHttpQueryDataAvailable(self.h_request, std::ptr::null_mut());
+                    WinHttpQueryDataAvailable(**self.h_request, std::ptr::null_mut());
                     Poll::Pending
                 } else {
                     let read_size = self
+                        .ctx
                         .buf_size
                         .min(buf.len())
-                        .min(self.buf_size - self.read_size);
+                        .min(self.ctx.buf_size - self.read_size);
                     buf[..read_size]
                         .copy_from_slice(&self.buf[self.read_size..self.read_size + read_size]);
                     self.read_size += read_size;
                     Poll::Ready(Ok(read_size))
                 }
             },
-            ResponseState::FinishedData => unsafe {
-                if self.buf_size <= self.read_size {
-                    #[cfg(debug_assertions)]
-                    println!("Finished Data, returning");
+            NetworkStatus::FinishedData => unsafe {
+                if self.ctx.buf_size <= self.read_size {
+                    // #[cfg(debug_assertions)]
+                    // println!("Finished Data, returning");
                     Poll::Ready(Ok(0))
                 } else {
                     let read_size = self
+                        .ctx
                         .buf_size
                         .min(buf.len())
-                        .min(self.buf_size - self.read_size);
+                        .min(self.ctx.buf_size - self.read_size);
                     buf[..read_size]
                         .copy_from_slice(&self.buf[self.read_size..self.read_size + read_size]);
                     self.read_size += read_size;
                     WinHttpReadData(
-                        self.h_request,
+                        **self.h_request,
                         self.buf.as_mut_ptr() as *mut _,
                         self.buf.len() as _,
                         std::ptr::null_mut(),
                     );
-                    WinHttpQueryDataAvailable(self.h_request, std::ptr::null_mut());
+                    WinHttpQueryDataAvailable(**self.h_request, std::ptr::null_mut());
                     Poll::Ready(Ok(read_size))
                 }
             },
+            NetworkStatus::Error(kind) => Poll::Ready(Err(kind.into())),
         }
     }
-}
-
-#[derive(Debug)]
-pub(crate) struct Connection {
-    h_connection: *mut c_void,
 }
 
 impl Client {
@@ -291,7 +380,7 @@ impl Client {
                 ..std::mem::zeroed()
             };
 
-            let result = WinHttpCrackUrl(url.as_ptr(), 0, 0, &mut component); // TODO: Error handling
+            let _result = WinHttpCrackUrl(url.as_ptr(), 0, 0, &mut component); // TODO: Error handling
 
             // dbg!(result);
 
@@ -314,7 +403,7 @@ impl Client {
             let url_path_w = url_path.to_utf16();
 
             let h_request = WinHttpOpenRequest(
-                conn.h_connection,
+                **conn,
                 method.as_raw_str_wide(),
                 url_path_w.as_ptr(),
                 std::ptr::null(),
@@ -334,45 +423,34 @@ impl Client {
                 connection: conn,
                 body: Box::new(futures::io::empty()),
                 body_len: 0,
-                state: ResponseState::Init,
-                h_request,
+                ctx: Box::pin(Default::default()),
+                h_request: Arc::new(h_request.into()),
                 buf: [0; 32],
-                waker: None,
+                _pinner: Default::default(),
             }
             .header("User-Agent", "alhc/0.1")
         }
     }
 
-    pub(crate) fn get_or_connect_connection(&self, hostname: &str) -> Arc<Connection> {
-        // unsafe {
-        //     let mut connections = self.connections.lock().unwrap();
-        //     if let Some(conn) = connections.get(hostname).cloned() {
-        //         conn
-        //     } else {
-        //         let hostname_w = hostname.to_utf16();
-        //         let h_connection = WinHttpConnect(
-        //             self.h_session,
-        //             hostname_w.as_ptr(),
-        //             INTERNET_DEFAULT_PORT,
-        //             0,
-        //         );
-        //         let conn = Arc::new(Connection { h_connection });
-
-        //         connections.insert(hostname.to_owned(), conn.clone());
-
-        //         conn
-        //     }
-        // }
+    pub(crate) fn get_or_connect_connection(&self, hostname: &str) -> Arc<Handle> {
         unsafe {
-            let hostname_w = hostname.to_utf16();
-            let h_connection = WinHttpConnect(
-                self.h_session,
-                hostname_w.as_ptr(),
-                INTERNET_DEFAULT_PORT,
-                0,
-            );
-            
-            Arc::new(Connection { h_connection })
+            let mut connections = self.connections.lock().unwrap();
+            if let Some(conn) = connections.get(hostname).cloned() {
+                conn
+            } else {
+                let hostname_w = hostname.to_utf16();
+                let h_connection = WinHttpConnect(
+                    *self.h_session,
+                    hostname_w.as_ptr(),
+                    INTERNET_DEFAULT_PORT,
+                    0,
+                );
+                let conn: Arc<Handle> = Arc::new(h_connection.into());
+
+                connections.insert(hostname.to_owned(), conn.clone());
+
+                conn
+            }
         }
     }
 }
@@ -390,8 +468,15 @@ impl ClientBuilder {
                 std::ptr::null(),
                 WINHTTP_FLAG_ASYNC,
             );
-            Client {
+            WinHttpSetOption(
                 h_session,
+                WINHTTP_OPTION_HTTP2_KEEPALIVE,
+                &15000u32 as *const _ as *const c_void,
+                4,
+            );
+            // dbg!(WinHttpSetTimeouts(h_session, 5000, 5000, 5000, 5000));
+            Client {
+                h_session: h_session.into(),
                 connections: Mutex::new(HashMap::with_capacity(16)),
             }
         }
@@ -405,66 +490,62 @@ unsafe extern "system" fn status_callback(
     lpv_status_infomation: *mut c_void,
     dw_status_infomation_length: u32,
 ) {
-    let request = dw_context as *mut std::pin::Pin<&mut Request>;
-    let request = request.as_mut().unwrap();
+    let ctx = dw_context as *mut NetworkContext;
+    let ctx = ctx.as_mut().unwrap();
 
-    let response = dw_context as *mut std::pin::Pin<&mut Response>;
-    let response = response.as_mut().unwrap();
+    // // println!("SCallback {:?} {:?}", h_request, dw_context as *mut c_void);
 
     match dw_internet_status {
         WINHTTP_CALLBACK_STATUS_RESOLVING_NAME => {
-            #[cfg(debug_assertions)]
-            println!("Resolving name");
+            // #[cfg(debug_assertions)]
+            // println!("Resolving name");
         }
         WINHTTP_CALLBACK_STATUS_NAME_RESOLVED => {
-            #[cfg(debug_assertions)]
-            println!("Name resolved");
+            // #[cfg(debug_assertions)]
+            // println!("Name resolved");
         }
         WINHTTP_CALLBACK_STATUS_CONNECTING_TO_SERVER => {
-            #[cfg(debug_assertions)]
-            println!("Connecting to server");
+            // #[cfg(debug_assertions)]
+            // println!("Connecting to server");
         }
         WINHTTP_CALLBACK_STATUS_CONNECTED_TO_SERVER => {
-            #[cfg(debug_assertions)]
-            println!("Connected to server");
+            // #[cfg(debug_assertions)]
+            // println!("Connected to server");
         }
         WINHTTP_CALLBACK_STATUS_SENDING_REQUEST => {
-            #[cfg(debug_assertions)]
-            println!("Sending request");
+            // #[cfg(debug_assertions)]
+            // println!("Sending request");
         }
         WINHTTP_CALLBACK_STATUS_REQUEST_SENT => {
-            #[cfg(debug_assertions)]
-            println!("Request sent");
+            // #[cfg(debug_assertions)]
+            // println!("Request sent");
         }
         WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE => {
-            #[cfg(debug_assertions)]
-            println!("Send request complete");
+            // #[cfg(debug_assertions)]
+            // println!("Send request complete");
             // Send body data
-            if let Some(waker) = &request.waker {
-                waker.wake_by_ref();
+            if let Some(waker) = ctx.waker.take() {
+                // println!("Waking");
+                waker.wake();
             }
         }
         WINHTTP_CALLBACK_STATUS_WRITE_COMPLETE => {
-            #[cfg(debug_assertions)]
-            println!("Write complete");
-            if let Some(waker) = &request.waker {
-                waker.wake_by_ref();
+            // println!("Write complete");
+            if let Some(waker) = ctx.waker.take() {
+                waker.wake();
             }
         }
         WINHTTP_CALLBACK_STATUS_RECEIVING_RESPONSE => {
-            #[cfg(debug_assertions)]
-            println!("Receiving response");
+            // println!("Receiving response");
         }
         WINHTTP_CALLBACK_STATUS_RESPONSE_RECEIVED => {
-            #[cfg(debug_assertions)]
-            println!("Response received");
+            // println!("Response received");
         }
         WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE => {
-            #[cfg(debug_assertions)]
-            println!("Headers available");
+            // println!("Headers available");
             let mut header_size = 0;
             WinHttpQueryHeaders(
-                response.h_request,
+                h_request,
                 WINHTTP_QUERY_RAW_HEADERS_CRLF,
                 std::ptr::null(),
                 std::ptr::null_mut(),
@@ -476,7 +557,7 @@ unsafe extern "system" fn status_callback(
             let mut header_data = vec![0u16; header_size as _];
 
             WinHttpQueryHeaders(
-                response.h_request,
+                h_request,
                 WINHTTP_QUERY_RAW_HEADERS_CRLF,
                 std::ptr::null(),
                 header_data.as_mut_ptr() as *mut _,
@@ -486,70 +567,65 @@ unsafe extern "system" fn status_callback(
 
             // dbg!(r); // TODO: Error handling
 
-            let header_data = OsString::from_wide(&header_data)
+            let _header_data = OsString::from_wide(&header_data)
                 .to_string_lossy()
                 .to_string();
 
-            WinHttpQueryDataAvailable(response.h_request, std::ptr::null_mut());
+            WinHttpQueryDataAvailable(h_request, std::ptr::null_mut());
 
             // println!("Header data: {}", header_data);
         }
         WINHTTP_CALLBACK_STATUS_CONNECTION_CLOSED => {
-            #[cfg(debug_assertions)]
-            println!("Connection Closed: {}", dw_status_infomation_length);
-            if let Some(waker) = &response.waker {
-                waker.wake_by_ref();
+            // #[cfg(debug_assertions)]
+            // println!("Connection Closed: {}", dw_status_infomation_length);
+            if let Some(waker) = ctx.waker.take() {
+                waker.wake();
             }
         }
         WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE => {
             let size = *(lpv_status_infomation as *mut u32);
-            #[cfg(debug_assertions)]
-            println!("Data available: {}", size);
+            // #[cfg(debug_assertions)]
+            // // println!("Data available: {}", size);
             if size == 0 {
                 // All data are received
-                response.state = ResponseState::FinishedData;
-                #[cfg(debug_assertions)]
-                println!("All data received");
+                ctx.status = NetworkStatus::FinishedData;
+                // #[cfg(debug_assertions)]
+                // println!("All data received");
             }
-            if let Some(waker) = &response.waker {
-                waker.wake_by_ref();
+            if let Some(waker) = ctx.waker.take() {
+                waker.wake();
             }
         }
         WINHTTP_CALLBACK_STATUS_READ_COMPLETE => {
-            #[cfg(debug_assertions)]
-            println!(
-                "Read complete available: {:016X} {}",
-                lpv_status_infomation as usize, dw_status_infomation_length
-            );
-            response.buf_size = dw_status_infomation_length as usize;
-            if let Some(waker) = &response.waker {
-                waker.wake_by_ref();
+            // #[cfg(debug_assertions)]
+            // // println!(
+            //     "Read complete available: {:016X} {}",
+            //     lpv_status_infomation as usize, dw_status_infomation_length
+            // );
+            ctx.buf_size = dw_status_infomation_length as usize;
+            if let Some(waker) = ctx.waker.take() {
+                waker.wake();
             }
         }
+        WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING => {
+            // println!("Handle closing: {:?}", h_request);
+        }
         WINHTTP_CALLBACK_STATUS_REQUEST_ERROR => {
-            
-        }
-        other => {
-            #[cfg(debug_assertions)]
-            println!("Unknown status: {:08X}", other);
-        }
-    }
-}
+            let result = (lpv_status_infomation as *mut WINHTTP_ASYNC_RESULT)
+                .as_ref()
+                .unwrap();
+            ctx.status = NetworkStatus::Error(match result.dwError {
+                ERROR_WINHTTP_TIMEOUT => ErrorKind::TimedOut,
+                _ => ErrorKind::Other,
+            });
 
-impl Drop for Client {
-    fn drop(&mut self) {
-        unsafe {
-            println!("Droping client");
-            WinHttpCloseHandle(self.h_session);
+            if let Some(waker) = ctx.waker.take() {
+                waker.wake();
+            }
         }
-    }
-}
-
-impl Drop for Connection {
-    fn drop(&mut self) {
-        unsafe {
-            println!("Droping connection");
-            WinHttpCloseHandle(self.h_connection);
+        _other => {
+            // #[cfg(debug_assertions)]
+            // println!("Unknown status: {:08X}", other);
         }
     }
 }
