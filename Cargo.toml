@@ -2,6 +2,9 @@
 name = "alhc"
 version = "0.1.0"
 authors = ["Steve Xiao <stevexmh@qq.com>"]
+homepage = "https://github.com/Steve-xmh/alhc"
+repository = "https://github.com/Steve-xmh/alhc"
+description = "Async Lightweight HTTP Client: A async http client library that using system library to reduce binary size if possible."
 edition = "2021"
 readme = "README.md"
 license = "MIT"
