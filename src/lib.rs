@@ -11,7 +11,7 @@ pub use crate::macos::*;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 compile_error!("ALHC is currently not supported by your target os.");
 
-pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub trait ClientExt {
     fn get(&self, url: &str) -> Result<Request>;

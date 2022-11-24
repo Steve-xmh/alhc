@@ -24,7 +24,7 @@ use windows_sys::Win32::{
     Networking::WinHttp::*,
 };
 
-use crate::Method;
+use crate::{Method, Result};
 
 trait ToWide {
     fn to_utf16(self) -> Vec<u16>;
@@ -399,7 +399,7 @@ impl AsyncRead for Response {
 }
 
 impl Client {
-    pub fn request(&self, method: Method, url: &str) -> std::io::Result<Request> {
+    pub fn request(&self, method: Method, url: &str) -> Result<Request> {
         unsafe {
             let url = url.to_utf16();
 
@@ -415,7 +415,7 @@ impl Client {
             let r = WinHttpCrackUrl(url.as_ptr(), 0, 0, &mut component); // TODO: Error handling
 
             if r == 0 {
-                return Err(resolve_error(GetLastError()).into());
+                return Err(Box::new(std::io::Error::last_os_error()));
             }
 
             let host_name =
@@ -445,7 +445,7 @@ impl Client {
             );
 
             if h_request.is_null() {
-                return Err(resolve_error(GetLastError()).into());
+                return Err(Box::new(std::io::Error::last_os_error()));
             }
 
             let r = WinHttpSetStatusCallback(
@@ -456,7 +456,7 @@ impl Client {
             );
 
             if r.map(|x| (x as usize) == usize::MAX).unwrap_or(false) {
-                return Err(resolve_error(GetLastError()).into());
+                return Err(Box::new(std::io::Error::last_os_error()));
             }
 
             Ok(Request {

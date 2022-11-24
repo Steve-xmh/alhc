@@ -1,4 +1,4 @@
-use std::{error::Error, sync::Arc, time::Instant};
+use std::{io::ErrorKind, sync::Arc, time::Instant};
 
 use alhc::*;
 
@@ -19,7 +19,8 @@ fn main() {
                 let instant = Instant::now();
                 // println!("Requesting {}", i);
                 let r = client
-                    .get("https://httpbin.org/anything")?
+                    .get("https://httpbin.org/anything")
+                    .map_err(|x| std::io::Error::new(ErrorKind::Other, x))?
                     .await?
                     .recv_string()
                     .await;
@@ -55,7 +56,7 @@ fn main() {
             failed
         );
 
-        Ok::<(), Box<dyn Error>>(())
+        Result::Ok(())
     }
     .block_on()
     .unwrap();
