@@ -1,3 +1,7 @@
+#[cfg(not(target_os = "macos"))]
+fn main() {}
+
+#[cfg(target_os = "macos")]
 fn main() {
     let output = std::process::Command::new("xcrun")
         .arg("--sdk")

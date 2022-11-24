@@ -61,7 +61,6 @@ enum NetworkStatus {
     BodySent,
     ReceivingData,
     FinishedData,
-    IOError(std::io::Error),
     CFError(CFError),
 }
 
@@ -338,7 +337,7 @@ impl Future for Request {
                 }
                 println!("Returning response");
                 return Poll::Ready(Ok(Response {
-                    req: self.req.clone(),
+                    _req: self.req.clone(),
                     read_size: 0,
                     buf_size: 0,
                     buf: [0; 32],
@@ -357,7 +356,7 @@ impl Future for Request {
 }
 
 pub struct Response {
-    req: Arc<CFHTTPMessageRefWrapper>,
+    _req: Arc<CFHTTPMessageRefWrapper>,
     ctx: Pin<Box<NetworkContext>>,
     res_read_stream: CFReadStreamRef,
     read_size: usize,
