@@ -1,5 +1,3 @@
-use std::error::Error;
-
 use alhc::*;
 
 use pollster::FutureExt;
@@ -13,5 +11,5 @@ fn main() -> Result {
         .recv_string()
         .block_on()?;
     println!("{}", r);
-    Ok::<(), Box<dyn Error>>(())
+    Ok(())
 }

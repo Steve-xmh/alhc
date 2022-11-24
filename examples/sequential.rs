@@ -1,4 +1,4 @@
-use std::{error::Error, io::ErrorKind, time::Instant};
+use std::{error::Error, time::Instant};
 
 use alhc::*;
 
@@ -17,8 +17,7 @@ fn main() {
             let instant = Instant::now();
             // println!("Requesting {}", i);
             let r = client
-                .get("https://httpbin.org/anything")
-                .map_err(|x| std::io::Error::new(ErrorKind::Other, x))?
+                .get("https://httpbin.org/anything")?
                 // .body_string("Hello World!".repeat(100))
                 .await?
                 .recv_string()

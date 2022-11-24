@@ -226,7 +226,7 @@ impl Future for Request {
                     let raw_err = CFReadStreamCopyError(self.res_read_stream);
                     let err = CFError::from_mut_void(raw_err as *mut _).to_owned();
                     CFRelease(raw_err as *mut _);
-                    return Poll::Ready(Err(Box::new(err)));
+                    return Poll::Ready(Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))));
                 }
 
                 CFReadStreamScheduleWithRunLoop(
@@ -281,7 +281,7 @@ impl Future for Request {
                                         let err =
                                             CFError::from_mut_void(raw_err as *mut _).to_owned();
                                         CFRelease(raw_err as *mut _);
-                                        return Poll::Ready(Err(Box::new(err)));
+                                        return Poll::Ready(Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))));
                                     }
                                     0 => {
                                         // Filled, wait for buffer
@@ -348,7 +348,7 @@ impl Future for Request {
                     }),
                 }));
             }
-            NetworkStatus::CFError(err) => return Poll::Ready(Err(Box::new(err.to_owned()))),
+            NetworkStatus::CFError(err) => return Poll::Ready(Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, err.to_string())))),
             _ => unreachable!(),
         }
         Poll::Pending
