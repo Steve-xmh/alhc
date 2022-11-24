@@ -1,13 +1,14 @@
 use std::error::Error;
 
-use alhc::ClientBuilder;
+use alhc::*;
 
 use pollster::FutureExt;
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result {
     let client = ClientBuilder::default().build();
     let r = client
-        .get("https://httpbin.org/anything")?
+        .post("https://httpbin.org/anything")?
+        .body_string("Hello World!".repeat(20))
         .block_on()?
         .recv_string()
         .block_on()?;

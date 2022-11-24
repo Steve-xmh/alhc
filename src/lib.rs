@@ -3,6 +3,32 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use crate::windows::*;
 
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use crate::macos::*;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+compile_error!("ALHC is currently not supported by your target os.");
+
+pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+pub trait ClientExt {
+    fn get(&self, url: &str) -> Result<Request>;
+
+    fn post(&self, url: &str) -> Result<Request>;
+}
+
+impl ClientExt for Client {
+    fn get(&self, url: &str) -> Result<Request> {
+        self.request(Method::GET, url)
+    }
+
+    fn post(&self, url: &str) -> Result<Request> {
+        self.request(Method::POST, url)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Method {
     GET,
@@ -30,6 +56,7 @@ impl Method {
     }
 
     // For windows only
+    #[cfg(target_os = "windows")]
     pub(crate) fn as_raw_str_wide(&self) -> *const u16 {
         let data: &[u16] = match self {
             Method::GET => &[71, 69, 84, 0],

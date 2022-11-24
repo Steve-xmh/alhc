@@ -399,15 +399,6 @@ impl AsyncRead for Response {
 }
 
 impl Client {
-    pub fn get(&self, url: &str) -> std::io::Result<Request> {
-        self.request(Method::GET, url)
-    }
-
-    pub fn post(&self, url: &str) -> std::io::Result<Request> {
-        self.request(Method::POST, url)
-    }
-
-    // pub fn request
     pub fn request(&self, method: Method, url: &str) -> std::io::Result<Request> {
         unsafe {
             let url = url.to_utf16();

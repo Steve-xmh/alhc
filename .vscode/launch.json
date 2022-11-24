@@ -1,0 +1,175 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'alhc'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=alhc"
+                ],
+                "filter": {
+                    "name": "alhc",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'macos_bindgen'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=macos_bindgen",
+                    "--package=alhc"
+                ],
+                "filter": {
+                    "name": "macos_bindgen",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in example 'macos_bindgen'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--example=macos_bindgen",
+                    "--package=alhc"
+                ],
+                "filter": {
+                    "name": "macos_bindgen",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'https'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=https",
+                    "--package=alhc"
+                ],
+                "filter": {
+                    "name": "https",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in example 'https'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--example=https",
+                    "--package=alhc"
+                ],
+                "filter": {
+                    "name": "https",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'parallel'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=parallel",
+                    "--package=alhc"
+                ],
+                "filter": {
+                    "name": "parallel",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in example 'parallel'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--example=parallel",
+                    "--package=alhc"
+                ],
+                "filter": {
+                    "name": "parallel",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'sequential'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=sequential",
+                    "--package=alhc"
+                ],
+                "filter": {
+                    "name": "sequential",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in example 'sequential'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--example=sequential",
+                    "--package=alhc"
+                ],
+                "filter": {
+                    "name": "sequential",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
