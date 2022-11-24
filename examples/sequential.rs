@@ -17,8 +17,8 @@ fn main() {
             let instant = Instant::now();
             // println!("Requesting {}", i);
             let r = client
-                .post("https://httpbin.org/anything")?
-                .body_string("Hello World!".repeat(100))
+                .get("https://httpbin.org/anything")?
+                // .body_string("Hello World!".repeat(100))
                 .await?
                 .recv_string()
                 .await;

@@ -95,6 +95,7 @@ pin_project_lite::pin_project! {
         req: Arc<CFHTTPMessageRefWrapper>,
         res_read_stream: CFReadStreamRef,
         req_write_stream: CFWriteStreamRef,
+        req_read_stream: CFReadStreamRef,
     }
 }
 
@@ -152,16 +153,14 @@ impl Future for Request {
         }
         match &self.ctx.status {
             NetworkStatus::Init => unsafe {
-                let mut body_read_stream = std::ptr::null_mut();
-
                 CFStreamCreateBoundPair(
                     kCFAllocatorDefault as *const _,
-                    &mut body_read_stream,
+                    &mut self.req_read_stream,
                     &mut self.req_write_stream,
                     32,
                 );
 
-                if body_read_stream.is_null() || self.req_write_stream.is_null() {
+                if self.req_read_stream.is_null() || self.req_write_stream.is_null() {
                     return Poll::Ready(Err(Box::new(std::io::Error::from(
                         std::io::ErrorKind::Other,
                     ))));
@@ -182,7 +181,7 @@ impl Future for Request {
                     &client_context,
                 );
                 CFReadStreamSetClient(
-                    body_read_stream,
+                    self.req_read_stream,
                     kCFStreamEventHasBytesAvailable
                         | kCFStreamEventErrorOccurred
                         | kCFStreamEventEndEncountered
@@ -197,7 +196,7 @@ impl Future for Request {
                     kCFRunLoopDefaultMode,
                 );
                 CFReadStreamScheduleWithRunLoop(
-                    body_read_stream,
+                    self.req_read_stream,
                     get_or_spawn_http_thread(),
                     kCFRunLoopDefaultMode,
                 );
@@ -206,7 +205,7 @@ impl Future for Request {
                 self.res_read_stream = CFReadStreamCreateForStreamedHTTPRequest(
                     kCFAllocatorDefault as *const _,
                     **self.req,
-                    body_read_stream,
+                    self.req_read_stream,
                 );
 
                 if self.res_read_stream.is_null() {
@@ -238,7 +237,7 @@ impl Future for Request {
                 );
 
                 dbg!(CFWriteStreamOpen(self.req_write_stream));
-                dbg!(CFReadStreamOpen(body_read_stream));
+                dbg!(CFReadStreamOpen(self.req_read_stream));
                 dbg!(CFReadStreamOpen(self.res_read_stream));
 
                 self.ctx.as_mut().get_unchecked_mut().status = NetworkStatus::SendingBody;
@@ -247,7 +246,8 @@ impl Future for Request {
             NetworkStatus::SendingBody => {
                 if self.buf_size <= self.read_size {
                     self.read_size = 0;
-                    println!("Aquiring data");
+                    self.buf_size = 0;
+                    // println!("Aquiring data");
                     let project = self.project();
                     match project.read_body.poll_read(cx, project.buf) {
                         Poll::Ready(Ok(size)) => {
@@ -302,7 +302,6 @@ impl Future for Request {
                                 }
                             }
                         }
-                        println!("Reading");
                         return Poll::Pending;
                     }
                 }
@@ -312,6 +311,12 @@ impl Future for Request {
                 unsafe {
                     dbg!(CFWriteStreamSetClient(
                         self.req_write_stream,
+                        0,
+                        None,
+                        std::ptr::null()
+                    ));
+                    dbg!(CFReadStreamSetClient(
+                        self.req_read_stream,
                         0,
                         None,
                         std::ptr::null()
@@ -517,6 +522,7 @@ impl Client {
                 body_len: 0,
                 res_read_stream: std::ptr::null_mut(),
                 req_write_stream: std::ptr::null_mut(),
+                req_read_stream: std::ptr::null_mut(),
                 req: Arc::new(CFHTTPMessageRefWrapper(req)),
             })
         }
@@ -570,9 +576,9 @@ fn get_or_spawn_http_thread() -> CFRunLoopRef {
         rx.recv().unwrap();
         let thread_loop = HTTP_THREAD_LOOP.load(Ordering::SeqCst);
         debug_assert!(!thread_loop.is_null());
-        dbg!(thread_loop)
+        thread_loop
     } else {
-        dbg!(thread_loop)
+        thread_loop
     }
 }
 
