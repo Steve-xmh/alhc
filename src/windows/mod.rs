@@ -123,6 +123,9 @@ impl Request {
     }
 }
 
+unsafe impl Send for Request {}
+unsafe impl Sync for Request {}
+
 impl Future for Request {
     type Output = futures::io::Result<Response>;
 
@@ -217,6 +220,9 @@ impl Future for Request {
         }
     }
 }
+
+unsafe impl Send for Response {}
+unsafe impl Sync for Response {}
 
 #[derive(Debug)]
 enum NetworkStatus {
@@ -665,7 +671,6 @@ unsafe extern "system" fn status_callback(
                 .to_string_lossy()
                 .to_string();
 
-            // TODO: Get Headers at Response
             ctx.raw_headers = header_data;
 
             let r = WinHttpQueryDataAvailable(h_request, std::ptr::null_mut());

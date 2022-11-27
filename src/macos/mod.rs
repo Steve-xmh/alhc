@@ -367,6 +367,9 @@ impl Future for Request {
     }
 }
 
+unsafe impl Send for Request {}
+unsafe impl Sync for Request {}
+
 pub struct Response {
     _req: Arc<CFHTTPMessageRefWrapper>,
     ctx: Pin<Box<NetworkContext>>,
@@ -473,6 +476,9 @@ impl AsyncRead for Response {
         }
     }
 }
+
+unsafe impl Send for Response {}
+unsafe impl Sync for Response {}
 
 impl Response {
     pub async fn recv(mut self) -> std::io::Result<ResponseBody> {
