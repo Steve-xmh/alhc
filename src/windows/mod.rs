@@ -286,6 +286,12 @@ impl Response {
         self.read_to_end(&mut result).await?;
         Ok(result)
     }
+    
+    #[cfg(feature = "serde")]
+    pub async fn recv_json<T: serde::de::DeserializeOwned>(self) -> crate::Result<T> {
+        let body = self.recv_string().await?;
+        Ok(serde_json::from_str(&body)?)
+    }
 }
 
 fn resolve_error(error_code: u32) -> ErrorKind {
@@ -595,6 +601,8 @@ unsafe extern "system" fn status_callback(
             let _header_data = OsString::from_wide(&header_data)
                 .to_string_lossy()
                 .to_string();
+            
+            // TODO: Get Headers at Response
 
             let r = WinHttpQueryDataAvailable(h_request, std::ptr::null_mut());
 

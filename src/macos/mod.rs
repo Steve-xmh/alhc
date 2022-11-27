@@ -474,6 +474,12 @@ impl Response {
         self.read_to_end(&mut result).await?;
         Ok(result)
     }
+    
+    #[cfg(feature = "serde")]
+    pub async fn recv_json<T: serde::de::DeserializeOwned>(self) -> crate::Result<T> {
+        let body = self.recv_string().await?;
+        Ok(serde_json::from_str(&body)?)
+    }
 }
 
 #[derive(Debug)]
