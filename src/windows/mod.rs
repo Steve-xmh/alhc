@@ -238,6 +238,9 @@ impl Default for NetworkStatus {
 #[derive(Clone, Debug)]
 pub(crate) struct Handle(*mut c_void);
 
+unsafe impl Send for Handle {}
+unsafe impl Sync for Handle {}
+
 impl From<*mut c_void> for Handle {
     fn from(h: *mut c_void) -> Self {
         Self(h)
