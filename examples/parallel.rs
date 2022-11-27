@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant, error::Error};
+use std::{error::Error, sync::Arc, time::Instant};
 
 use alhc::*;
 
@@ -17,13 +17,9 @@ fn main() {
             let client = client.clone();
             async move {
                 let instant = Instant::now();
-                let r = client
-                .get("https://httpbin.org/anything")?;
+                let r = client.get("https://httpbin.org/anything")?;
                 // println!("Requesting {}", i);
-                let r = r
-                    .await?
-                    .recv_string()
-                    .await;
+                let r = r.await?.recv_string().await;
                 if let Err(err) = &r {
                     println!("Request {} Error: {}", i, err);
                 } else {

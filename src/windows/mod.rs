@@ -46,6 +46,7 @@ pub struct Client {
 struct NetworkContext {
     waker: Option<Waker>,
     status: NetworkStatus,
+    raw_headers: String,
     buf_size: usize,
     _pinner: PhantomPinned,
 }
@@ -275,22 +276,81 @@ pub struct Response {
 }
 
 impl Response {
+    pub async fn recv(mut self) -> std::io::Result<ResponseBody> {
+        let mut data = Vec::with_capacity(256);
+        self.read_to_end(&mut data).await?;
+        data.shrink_to_fit();
+        let mut headers_lines = self.ctx.raw_headers.lines();
+
+        let status_code = headers_lines
+            .next()
+            .and_then(|x| x.split(' ').nth(1).map(|x| x.parse::<u16>().unwrap_or(0)))
+            .unwrap_or(0);
+
+        let mut parsed_headers: HashMap<String, String> =
+            HashMap::with_capacity(headers_lines.size_hint().1.unwrap_or(8));
+
+        for header in headers_lines {
+            if let Some((key, value)) = header.split_once('=') {
+                let key = key.trim();
+                let value = value.trim();
+                if let Some(exist_header) = parsed_headers.get_mut(key) {
+                    exist_header.push_str("; ");
+                    exist_header.push_str(value);
+                } else {
+                    parsed_headers.insert(key.to_owned(), value.to_owned());
+                }
+            }
+        }
+
+        Ok(ResponseBody {
+            data,
+            code: status_code,
+            headers: parsed_headers,
+        })
+    }
+
     pub async fn recv_string(mut self) -> std::io::Result<String> {
         let mut result = String::with_capacity(256);
         self.read_to_string(&mut result).await?;
+        result.shrink_to_fit();
         Ok(result)
     }
 
     pub async fn recv_bytes(mut self) -> std::io::Result<Vec<u8>> {
         let mut result = Vec::with_capacity(256);
         self.read_to_end(&mut result).await?;
+        result.shrink_to_fit();
         Ok(result)
     }
-    
+
     #[cfg(feature = "serde")]
     pub async fn recv_json<T: serde::de::DeserializeOwned>(self) -> crate::Result<T> {
         let body = self.recv_string().await?;
         Ok(serde_json::from_str(&body)?)
+    }
+}
+
+pub struct ResponseBody {
+    data: Vec<u8>,
+    code: u16,
+    headers: HashMap<String, String>,
+}
+
+impl ResponseBody {
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn status_code(&self) -> u16 {
+        self.code
+    }
+
+    pub fn header(&self, header: &str) -> Option<&str> {
+        self.headers
+            .keys()
+            .find(|x| x.eq_ignore_ascii_case(header))
+            .and_then(|x| self.headers.get(x).map(String::as_str))
     }
 }
 
@@ -598,11 +658,12 @@ unsafe extern "system" fn status_callback(
                 return;
             }
 
-            let _header_data = OsString::from_wide(&header_data)
+            let header_data = OsString::from_wide(&header_data)
                 .to_string_lossy()
                 .to_string();
-            
+
             // TODO: Get Headers at Response
+            ctx.raw_headers = header_data;
 
             let r = WinHttpQueryDataAvailable(h_request, std::ptr::null_mut());
 

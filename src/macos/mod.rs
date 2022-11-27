@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ffi::c_void,
     fmt::Debug,
     io::ErrorKind,
@@ -226,7 +227,10 @@ impl Future for Request {
                     let raw_err = CFReadStreamCopyError(self.res_read_stream);
                     let err = CFError::from_mut_void(raw_err as *mut _).to_owned();
                     CFRelease(raw_err as *mut _);
-                    return Poll::Ready(Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))));
+                    return Poll::Ready(Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        err.to_string(),
+                    ))));
                 }
 
                 CFReadStreamScheduleWithRunLoop(
@@ -281,7 +285,10 @@ impl Future for Request {
                                         let err =
                                             CFError::from_mut_void(raw_err as *mut _).to_owned();
                                         CFRelease(raw_err as *mut _);
-                                        return Poll::Ready(Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))));
+                                        return Poll::Ready(Err(Box::new(std::io::Error::new(
+                                            std::io::ErrorKind::Other,
+                                            err.to_string(),
+                                        ))));
                                     }
                                     0 => {
                                         // Filled, wait for buffer
@@ -348,7 +355,12 @@ impl Future for Request {
                     }),
                 }));
             }
-            NetworkStatus::CFError(err) => return Poll::Ready(Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, err.to_string())))),
+            NetworkStatus::CFError(err) => {
+                return Poll::Ready(Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    err.to_string(),
+                ))))
+            }
             _ => unreachable!(),
         }
         Poll::Pending
@@ -463,6 +475,20 @@ impl AsyncRead for Response {
 }
 
 impl Response {
+    pub async fn recv(mut self) -> std::io::Result<ResponseBody> {
+        let mut data = Vec::with_capacity(256);
+        self.read_to_end(&mut data).await?;
+        data.shrink_to_fit();
+
+        // TODO: Headers and status code
+
+        Ok(ResponseBody {
+            data,
+            code: 0,
+            headers: HashMap::default(),
+        })
+    }
+
     pub async fn recv_string(mut self) -> Result<String> {
         let mut result = String::with_capacity(256);
         self.read_to_string(&mut result).await?;
@@ -474,11 +500,34 @@ impl Response {
         self.read_to_end(&mut result).await?;
         Ok(result)
     }
-    
+
     #[cfg(feature = "serde")]
     pub async fn recv_json<T: serde::de::DeserializeOwned>(self) -> crate::Result<T> {
         let body = self.recv_string().await?;
         Ok(serde_json::from_str(&body)?)
+    }
+}
+
+pub struct ResponseBody {
+    data: Vec<u8>,
+    code: u16,
+    headers: HashMap<String, String>,
+}
+
+impl ResponseBody {
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn status_code(&self) -> u16 {
+        self.code
+    }
+
+    pub fn header(&self, header: &str) -> Option<&str> {
+        self.headers
+            .keys()
+            .find(|x| x.eq_ignore_ascii_case(header))
+            .and_then(|x| self.headers.get(x).map(String::as_str))
     }
 }
 
