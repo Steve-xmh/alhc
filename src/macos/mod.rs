@@ -525,6 +525,10 @@ impl ResponseBody {
         &self.data
     }
 
+    pub fn data_string(&self) -> Cow<str> {
+        String::from_utf8_lossy(&self.data)
+    }
+
     pub fn status_code(&self) -> u16 {
         self.code
     }

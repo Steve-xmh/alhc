@@ -1,9 +1,8 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     ffi::{c_void, OsString},
     fmt::Debug,
-    io::ErrorKind,
-    marker::PhantomPinned,
     ops::Deref,
     os::windows::ffi::OsStringExt,
     pin::Pin,
@@ -18,9 +17,7 @@ use futures::{
 };
 use std::future::Future;
 use windows_sys::Win32::{
-    Foundation::{
-        GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY,
-    },
+    Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER},
     Networking::WinHttp::*,
 };
 
@@ -42,25 +39,40 @@ pub struct Client {
     connections: Mutex<HashMap<String, Arc<Handle>>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct NetworkContext {
     waker: Option<Waker>,
     status: NetworkStatus,
+    io_error: std::io::Error,
     raw_headers: String,
     buf_size: usize,
-    _pinner: PhantomPinned,
 }
+
+impl Default for NetworkContext {
+    fn default() -> Self {
+        Self {
+            waker: None,
+            status: NetworkStatus::Init,
+            io_error: std::io::ErrorKind::Other.into(),
+            raw_headers: String::default(),
+            buf_size: 0,
+        }
+    }
+}
+
+// According to WinHTTP documention, buffer should be at least 8KB.
+// https://learn.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpreaddata#remarks
+const BUF_SIZE: usize = 8 * 1024;
 
 pin_project_lite::pin_project! {
     pub struct Request {
         connection: Arc<Handle>,
         h_request: Arc<Handle>,
         #[pin]
-        body: Box<dyn AsyncRead + Unpin + 'static>,
+        body: Box<dyn AsyncRead + Unpin + Send + Sync + 'static>,
         body_len: usize,
-        buf: [u8; 32],
+        buf: [u8; BUF_SIZE],
         ctx: Pin<Box<NetworkContext>>,
-        _pinner: PhantomPinned,
     }
 }
 
@@ -77,7 +89,11 @@ impl Debug for Request {
 }
 
 impl Request {
-    pub fn body(mut self, body: impl AsyncRead + Unpin + 'static, body_size: usize) -> Self {
+    pub fn body(
+        mut self,
+        body: impl AsyncRead + Unpin + Send + Sync + 'static,
+        body_size: usize,
+    ) -> Self {
         self.body_len = body_size;
         self.body = Box::new(body);
         self
@@ -93,6 +109,28 @@ impl Request {
         self.body_len = body.len();
         self.body = Box::new(Cursor::new(body));
         self
+    }
+
+    pub async fn recv(self) -> Result<ResponseBody> {
+        Ok(self.await?.recv().await?)
+    }
+
+    pub async fn recv_string(self) -> std::io::Result<String> {
+        self.await?.recv_string().await
+    }
+
+    pub async fn recv_bytes(self) -> std::io::Result<Vec<u8>> {
+        self.await?.recv_bytes().await
+    }
+
+    #[cfg(feature = "serde")]
+    pub async fn recv_json<T: serde::de::DeserializeOwned>(self) -> crate::Result<T> {
+        self.await?.recv_json().await
+    }
+
+    #[cfg(feature = "serde")]
+    pub fn body_json<T: ?Sized + serde::ser::Serialize>(self, body: &T) -> Result<Self> {
+        Ok(self.body_string(serde_json::to_string(body)?))
     }
 
     pub fn header(self, header: &str, value: &str) -> Self {
@@ -123,22 +161,20 @@ impl Request {
     }
 }
 
-unsafe impl Send for Request {}
-unsafe impl Sync for Request {}
-
 impl Future for Request {
     type Output = futures::io::Result<Response>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        unsafe {
-            let ctx = self.ctx.as_mut().get_unchecked_mut();
-            if ctx.waker.is_none() {
-                ctx.waker = Some(cx.waker().clone());
-            }
-        }
-        match self.ctx.status {
+        let status = self.ctx.status;
+        self.ctx.status = NetworkStatus::Pending;
+        match status {
+            NetworkStatus::Pending => Poll::Pending,
             NetworkStatus::Init => {
                 unsafe {
+                    let ctx = self.ctx.as_mut().get_unchecked_mut();
+                    if ctx.waker.is_none() {
+                        ctx.waker = Some(cx.waker().clone());
+                    }
                     let send_result = WinHttpSendRequest(
                         **self.h_request,
                         std::ptr::null(),
@@ -149,27 +185,19 @@ impl Future for Request {
                         self.ctx.as_mut().get_unchecked_mut() as *mut _ as usize,
                     );
                     if send_result == 0 {
-                        return Poll::Ready(Err(resolve_error(GetLastError()).into()));
+                        println!("Request::Future WinHttpSendRequest failed");
+                        return Poll::Ready(resolve_io_error());
                     }
-                }
-                // It's safe to modify field
-                unsafe {
-                    self.ctx.as_mut().get_unchecked_mut().status = NetworkStatus::Pending;
                 }
                 Poll::Pending
             }
-            NetworkStatus::Pending => Poll::Pending,
-            NetworkStatus::SendingBody => {
+            NetworkStatus::WriteCompleted => {
+                // println!("Request::Future::NetworkStatus::WriteCompleted");
                 let project = self.project();
                 match project.body.poll_read(cx, project.buf) {
                     Poll::Ready(Ok(size)) => {
                         if size == 0 {
-                            // All body has read, waiting last block send
-                            // It's safe to modify field
-                            unsafe {
-                                project.ctx.as_mut().get_unchecked_mut().status =
-                                    NetworkStatus::BodySent;
-                            }
+                            project.ctx.status = NetworkStatus::BodySent;
                             cx.waker().wake_by_ref();
                         } else {
                             unsafe {
@@ -182,7 +210,8 @@ impl Future for Request {
                                     std::ptr::null_mut(),
                                 );
                                 if r == 0 {
-                                    return Poll::Ready(Err(resolve_error(GetLastError()).into()));
+                                    println!("Request::Future WinHttpWriteData failed");
+                                    return Poll::Ready(resolve_io_error());
                                 }
                             }
                         }
@@ -193,10 +222,22 @@ impl Future for Request {
                 }
             }
             NetworkStatus::BodySent => {
+                // All body is sent, wait for the header
+                unsafe {
+                    let r = WinHttpReceiveResponse(**self.h_request, std::ptr::null_mut());
+                    if r == 0 {
+                        println!("Request::Future WinHttpReceiveResponse failed");
+                        return Poll::Ready(resolve_io_error());
+                    }
+                }
+                Poll::Pending
+            }
+            NetworkStatus::HeadersReceived => {
                 // All body is sent, return the response and start read http response
                 let mut ctx = Box::pin(NetworkContext::default());
                 unsafe {
                     let ctx = ctx.as_mut().get_unchecked_mut();
+                    ctx.raw_headers = self.ctx.raw_headers.to_owned();
                     let r = WinHttpSetOption(
                         **self.h_request,
                         WINHTTP_OPTION_CONTEXT_VALUE,
@@ -204,7 +245,8 @@ impl Future for Request {
                         std::mem::size_of::<*const c_void>() as _,
                     );
                     if r == 0 {
-                        return Poll::Ready(Err(resolve_error(GetLastError()).into()));
+                        println!("Request::Future WinHttpSetOption failed");
+                        return Poll::Ready(resolve_io_error());
                     }
                 }
                 Poll::Ready(Ok(Response {
@@ -212,27 +254,29 @@ impl Future for Request {
                     ctx,
                     h_request: self.h_request.clone(),
                     read_size: 0,
-                    buf: [0; 32],
+                    buf: [0; BUF_SIZE],
                 }))
             }
-            NetworkStatus::Error(kind) => Poll::Ready(Err(kind.into())),
+            NetworkStatus::Error => Poll::Ready(Err(std::io::Error::from_raw_os_error(
+                self.ctx.io_error.raw_os_error().unwrap_or_default(),
+            ))),
             _ => unreachable!(),
         }
     }
 }
 
-unsafe impl Send for Response {}
-unsafe impl Sync for Response {}
-
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum NetworkStatus {
-    Init,
+    Init = 0,
     Pending,
-    SendingBody,
+    Error,
+    // For Requests
+    WriteCompleted,
     BodySent,
-    ReceivingData,
-    FinishedData,
-    Error(ErrorKind),
+    HeadersReceived,
+    // For Responses
+    DataAvailable,
+    DataWritten,
 }
 
 impl Default for NetworkStatus {
@@ -265,6 +309,13 @@ impl Drop for Handle {
     fn drop(&mut self) {
         unsafe {
             // println!("Closing handle: {:?}", self.0);
+            let nil = std::ptr::null::<c_void>();
+            WinHttpSetOption(
+                self as *mut Self as *mut _,
+                WINHTTP_OPTION_CONTEXT_VALUE,
+                &nil as *const _ as *const c_void,
+                std::mem::size_of::<*const c_void>() as _,
+            );
             if WinHttpCloseHandle(self.0) == 0 {
                 panic!(
                     "Can't close handle for {:?}: {:08X}",
@@ -280,7 +331,7 @@ pub struct Response {
     _connection: Arc<Handle>,
     ctx: Pin<Box<NetworkContext>>,
     read_size: usize,
-    buf: [u8; 32],
+    buf: [u8; BUF_SIZE],
     h_request: Arc<Handle>,
 }
 
@@ -300,7 +351,7 @@ impl Response {
             HashMap::with_capacity(headers_lines.size_hint().1.unwrap_or(8));
 
         for header in headers_lines {
-            if let Some((key, value)) = header.split_once('=') {
+            if let Some((key, value)) = header.split_once(": ") {
                 let key = key.trim();
                 let value = value.trim();
                 if let Some(exist_header) = parsed_headers.get_mut(key) {
@@ -315,7 +366,7 @@ impl Response {
         Ok(ResponseBody {
             data,
             code: status_code,
-            headers: parsed_headers,
+            headers: dbg!(parsed_headers),
         })
     }
 
@@ -351,6 +402,10 @@ impl ResponseBody {
         &self.data
     }
 
+    pub fn data_string(&self) -> Cow<str> {
+        String::from_utf8_lossy(&self.data)
+    }
+
     pub fn status_code(&self) -> u16 {
         self.code
     }
@@ -363,23 +418,8 @@ impl ResponseBody {
     }
 }
 
-fn resolve_error(error_code: u32) -> ErrorKind {
-    match error_code {
-        ERROR_WINHTTP_CANNOT_CONNECT => ErrorKind::NotConnected,
-        ERROR_WINHTTP_CONNECTION_ERROR => ErrorKind::ConnectionAborted,
-        ERROR_WINHTTP_TIMEOUT => ErrorKind::TimedOut,
-        ERROR_NOT_ENOUGH_MEMORY => ErrorKind::OutOfMemory,
-        ERROR_WINHTTP_INCORRECT_HANDLE_STATE => ErrorKind::Other,
-        ERROR_WINHTTP_INCORRECT_HANDLE_TYPE => ErrorKind::Other,
-        ERROR_WINHTTP_INTERNAL_ERROR => ErrorKind::Other,
-        ERROR_WINHTTP_INVALID_OPTION => ErrorKind::InvalidInput,
-        ERROR_INVALID_PARAMETER => ErrorKind::InvalidInput,
-        ERROR_WINHTTP_OPTION_NOT_SETTABLE => ErrorKind::InvalidInput,
-        _ => {
-            println!("[WARN] Unknown error code 0x{:08X}", error_code);
-            ErrorKind::Other
-        }
-    }
+fn resolve_io_error<T>() -> std::io::Result<T> {
+    unsafe { Err(std::io::Error::from_raw_os_error(dbg!(GetLastError()) as _)) }
 }
 
 impl AsyncRead for Response {
@@ -388,46 +428,55 @@ impl AsyncRead for Response {
         cx: &mut std::task::Context<'_>,
         buf: &mut [u8],
     ) -> Poll<futures::io::Result<usize>> {
-        unsafe {
-            let ctx = self.ctx.as_mut().get_unchecked_mut();
-            if ctx.waker.is_none() {
-                ctx.waker = Some(cx.waker().clone());
-            }
-        }
-        match self.ctx.status {
+        let status = self.ctx.status;
+        self.ctx.status = NetworkStatus::Pending;
+        match status {
             NetworkStatus::Init => {
+                // println!("Response::Future Init");
                 unsafe {
-                    let r = WinHttpReceiveResponse(**self.h_request, std::ptr::null_mut());
-                    if r == 0 {
-                        return Poll::Ready(Err(resolve_error(GetLastError()).into()));
+                    let ctx = self.ctx.as_mut().get_unchecked_mut();
+                    if ctx.waker.is_none() {
+                        ctx.waker = Some(cx.waker().clone());
                     }
-                }
-                // It's safe to modify field
-                unsafe {
-                    self.ctx.as_mut().get_unchecked_mut().status = NetworkStatus::ReceivingData;
+                    let r = WinHttpQueryDataAvailable(**self.h_request, std::ptr::null_mut());
+                    if r == 0 {
+                        println!("Response::Future::Init WinHttpQueryDataAvailable failed");
+                        return Poll::Ready(resolve_io_error());
+                    }
                 }
                 Poll::Pending
             }
-            NetworkStatus::SendingBody => unreachable!(),
+            NetworkStatus::WriteCompleted => unreachable!(),
             NetworkStatus::BodySent => unreachable!(),
-            NetworkStatus::ReceivingData => unsafe {
-                if self.ctx.buf_size <= self.read_size {
-                    self.read_size = 0;
-                    let r = WinHttpReadData(
-                        **self.h_request,
-                        self.buf.as_mut_ptr() as *mut _,
-                        self.buf.len() as _,
-                        std::ptr::null_mut(),
-                    );
-                    if r == 0 {
-                        return Poll::Ready(Err(resolve_error(GetLastError()).into()));
-                    }
+            NetworkStatus::HeadersReceived => unreachable!(),
+            NetworkStatus::DataAvailable => unsafe {
+                // println!("Response::Future DataAvailable");
+                self.read_size = 0;
+                let r = WinHttpReadData(
+                    **self.h_request,
+                    self.buf.as_mut_ptr() as *mut _,
+                    self.buf.len() as _,
+                    std::ptr::null_mut(),
+                );
+                if r == 0 {
+                    println!("Response::Future::DataAvailable WinHttpReadData failed");
+                    return Poll::Ready(resolve_io_error());
+                }
+                Poll::Pending
+            },
+            NetworkStatus::DataWritten => unsafe {
+                // println!("Response::Future DataWritten");
+                if self.ctx.buf_size == 0 {
+                    Poll::Ready(Ok(0))
+                } else if self.read_size >= self.ctx.buf_size {
                     let r = WinHttpQueryDataAvailable(**self.h_request, std::ptr::null_mut());
                     if r == 0 {
-                        return Poll::Ready(Err(resolve_error(GetLastError()).into()));
+                        println!("Response::Future::DataWritten WinHttpQueryDataAvailable failed");
+                        return Poll::Ready(resolve_io_error());
                     }
                     Poll::Pending
                 } else {
+                    self.ctx.status = NetworkStatus::DataWritten;
                     let read_size = self
                         .ctx
                         .buf_size
@@ -436,39 +485,13 @@ impl AsyncRead for Response {
                     buf[..read_size]
                         .copy_from_slice(&self.buf[self.read_size..self.read_size + read_size]);
                     self.read_size += read_size;
-                    Poll::Ready(Ok(read_size))
-                }
-            },
-            NetworkStatus::FinishedData => unsafe {
-                if self.ctx.buf_size <= self.read_size {
-                    Poll::Ready(Ok(0))
-                } else {
-                    let read_size = self
-                        .ctx
-                        .buf_size
-                        .min(buf.len())
-                        .min(self.ctx.buf_size - self.read_size);
-                    buf[..read_size]
-                        .copy_from_slice(&self.buf[self.read_size..self.read_size + read_size]);
-                    self.read_size += read_size;
-                    let r = WinHttpReadData(
-                        **self.h_request,
-                        self.buf.as_mut_ptr() as *mut _,
-                        self.buf.len() as _,
-                        std::ptr::null_mut(),
-                    );
-                    if r == 0 {
-                        return Poll::Ready(Err(resolve_error(GetLastError()).into()));
-                    }
-                    let r = WinHttpQueryDataAvailable(**self.h_request, std::ptr::null_mut());
-                    if r == 0 {
-                        return Poll::Ready(Err(resolve_error(GetLastError()).into()));
-                    }
                     Poll::Ready(Ok(read_size))
                 }
             },
             NetworkStatus::Pending => Poll::Pending,
-            NetworkStatus::Error(kind) => Poll::Ready(Err(kind.into())),
+            NetworkStatus::Error => Poll::Ready(Err(std::io::Error::from_raw_os_error(
+                self.ctx.io_error.raw_os_error().unwrap_or_default(),
+            ))),
         }
     }
 }
@@ -476,6 +499,8 @@ impl AsyncRead for Response {
 impl Client {
     pub fn request(&self, method: Method, url: &str) -> Result<Request> {
         unsafe {
+            // println!("Requesting {}", url);
+
             let url = url.to_utf16();
 
             let mut component = URL_COMPONENTS {
@@ -490,7 +515,10 @@ impl Client {
             let r = WinHttpCrackUrl(url.as_ptr(), 0, 0, &mut component); // TODO: Error handling
 
             if r == 0 {
+                #[cfg(not(feature = "anyhow"))]
                 return Err(Box::new(std::io::Error::last_os_error()));
+                #[cfg(feature = "anyhow")]
+                anyhow::bail!("Failed on WinHttpCrackUrl: {}", GetLastError())
             }
 
             let host_name =
@@ -520,7 +548,10 @@ impl Client {
             );
 
             if h_request.is_null() {
+                #[cfg(not(feature = "anyhow"))]
                 return Err(Box::new(std::io::Error::last_os_error()));
+                #[cfg(feature = "anyhow")]
+                anyhow::bail!("Failed on WinHttpOpenRequest: {}", GetLastError())
             }
 
             let r = WinHttpSetStatusCallback(
@@ -531,7 +562,10 @@ impl Client {
             );
 
             if r.map(|x| (x as usize) == usize::MAX).unwrap_or(false) {
+                #[cfg(not(feature = "anyhow"))]
                 return Err(Box::new(std::io::Error::last_os_error()));
+                #[cfg(feature = "anyhow")]
+                anyhow::bail!("Failed on WinHttpSetStatusCallback: {}", GetLastError())
             }
 
             Ok(Request {
@@ -540,8 +574,7 @@ impl Client {
                 body_len: 0,
                 ctx: Box::pin(Default::default()),
                 h_request: Arc::new(h_request.into()),
-                buf: [0; 32],
-                _pinner: Default::default(),
+                buf: [0; BUF_SIZE],
             }
             .header("User-Agent", "alhc/0.1"))
         }
@@ -562,7 +595,8 @@ impl Client {
                 );
 
                 if h_connection.is_null() {
-                    return Err(resolve_error(GetLastError()).into());
+                    println!("Client::get_or_connect_connection WinHttpConnect failed");
+                    return resolve_io_error();
                 }
 
                 let conn: Arc<Handle> = Arc::new(h_connection.into());
@@ -610,109 +644,144 @@ unsafe extern "system" fn status_callback(
     dw_status_infomation_length: u32,
 ) {
     let ctx = dw_context as *mut NetworkContext;
-    let ctx = ctx.as_mut().unwrap();
 
-    match dw_internet_status {
-        WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE => {
-            ctx.status = NetworkStatus::SendingBody;
-            if let Some(waker) = ctx.waker.take() {
-                waker.wake();
+    if let Some(ctx) = ctx.as_mut() {
+        // println!("status_callback -> {}", dw_internet_status);
+        match dw_internet_status {
+            WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE => {
+                ctx.status = NetworkStatus::WriteCompleted;
+                if let Some(waker) = &ctx.waker {
+                    waker.wake_by_ref();
+                }
+
+                // println!("Status Callback -> Send Request Complete");
             }
-        }
-        WINHTTP_CALLBACK_STATUS_WRITE_COMPLETE => {
-            if let Some(waker) = ctx.waker.take() {
-                waker.wake();
+            WINHTTP_CALLBACK_STATUS_WRITE_COMPLETE => {
+                ctx.status = NetworkStatus::WriteCompleted;
+                if let Some(waker) = &ctx.waker {
+                    waker.wake_by_ref();
+                }
             }
-        }
-        WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE => {
-            // println!("Headers available");
-            let mut header_size = 0;
+            WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE => {
+                // println!("Headers available");
+                let mut header_size = 0;
 
-            let r = WinHttpQueryHeaders(
-                h_request,
-                WINHTTP_QUERY_RAW_HEADERS_CRLF,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                &mut header_size,
-                std::ptr::null_mut(),
-            );
+                let r = WinHttpQueryHeaders(
+                    h_request,
+                    WINHTTP_QUERY_RAW_HEADERS_CRLF,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    &mut header_size,
+                    std::ptr::null_mut(),
+                );
 
-            if r == 0 {
-                let code = GetLastError();
-                if code != ERROR_INSUFFICIENT_BUFFER {
-                    ctx.status = dbg!(NetworkStatus::Error(resolve_error(GetLastError())));
-                    if let Some(waker) = ctx.waker.take() {
-                        waker.wake();
+                if r == 0 {
+                    let code = GetLastError();
+                    if code != ERROR_INSUFFICIENT_BUFFER {
+                        println!(
+                            "status_callback::WinHttpQueryHeaders WinHttpQueryHeaders 0 failed"
+                        );
+                        ctx.io_error = dbg!(resolve_io_error::<()>().unwrap_err());
+                        ctx.status = NetworkStatus::Error;
+                        if let Some(waker) = &ctx.waker {
+                            waker.wake_by_ref();
+                        }
+                        return;
+                    }
+                }
+
+                let mut header_data = vec![0u16; header_size as _];
+
+                let r = WinHttpQueryHeaders(
+                    h_request,
+                    WINHTTP_QUERY_RAW_HEADERS_CRLF,
+                    std::ptr::null(),
+                    header_data.as_mut_ptr() as *mut _,
+                    &mut header_size,
+                    std::ptr::null_mut(),
+                );
+
+                if r == 0 {
+                    println!("status_callback::WinHttpQueryHeaders WinHttpQueryHeaders 1 failed");
+                    ctx.io_error = dbg!(resolve_io_error::<()>().unwrap_err());
+                    ctx.status = NetworkStatus::Error;
+                    if let Some(waker) = &ctx.waker {
+                        waker.wake_by_ref();
                     }
                     return;
                 }
-            }
 
-            let mut header_data = vec![0u16; header_size as _];
+                let header_data = OsString::from_wide(&header_data)
+                    .to_string_lossy()
+                    .trim_end_matches('\0')
+                    .to_string();
 
-            let r = WinHttpQueryHeaders(
-                h_request,
-                WINHTTP_QUERY_RAW_HEADERS_CRLF,
-                std::ptr::null(),
-                header_data.as_mut_ptr() as *mut _,
-                &mut header_size,
-                std::ptr::null_mut(),
-            );
+                ctx.raw_headers = header_data;
 
-            if r == 0 {
-                ctx.status = dbg!(NetworkStatus::Error(resolve_error(GetLastError())));
-                if let Some(waker) = ctx.waker.take() {
-                    waker.wake();
-                }
-                return;
-            }
+                ctx.status = NetworkStatus::HeadersReceived;
 
-            let header_data = OsString::from_wide(&header_data)
-                .to_string_lossy()
-                .to_string();
+                // println!("Status Callback -> Headers Available:\n{}", ctx.raw_headers);
 
-            ctx.raw_headers = header_data;
-
-            let r = WinHttpQueryDataAvailable(h_request, std::ptr::null_mut());
-
-            if r == 0 {
-                ctx.status = NetworkStatus::Error(resolve_error(GetLastError()));
-                if let Some(waker) = ctx.waker.take() {
-                    waker.wake();
+                if let Some(waker) = &ctx.waker {
+                    waker.wake_by_ref();
                 }
             }
-        }
-        WINHTTP_CALLBACK_STATUS_CONNECTION_CLOSED => {
-            if let Some(waker) = ctx.waker.take() {
-                waker.wake();
+            WINHTTP_CALLBACK_STATUS_RECEIVING_RESPONSE => {
+                // println!("Status Callback -> Receiving Response");
+                if let Some(waker) = &ctx.waker {
+                    waker.wake_by_ref();
+                }
             }
-        }
-        WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE => {
-            let size = *(lpv_status_infomation as *mut u32);
-            if size == 0 {
-                // All data are received
-                ctx.status = NetworkStatus::FinishedData;
-            }
-            if let Some(waker) = ctx.waker.take() {
-                waker.wake();
-            }
-        }
-        WINHTTP_CALLBACK_STATUS_READ_COMPLETE => {
-            ctx.buf_size = dw_status_infomation_length as usize;
-            if let Some(waker) = ctx.waker.take() {
-                waker.wake();
-            }
-        }
-        WINHTTP_CALLBACK_STATUS_REQUEST_ERROR => {
-            let result = (lpv_status_infomation as *mut WINHTTP_ASYNC_RESULT)
-                .as_ref()
-                .unwrap();
-            ctx.status = NetworkStatus::Error(resolve_error(result.dwError));
+            WINHTTP_CALLBACK_STATUS_CONNECTION_CLOSED => {
+                // println!(
+                //     "Status Callback -> Connection Closed -> {:?}",
+                //     h_request
+                // );
 
-            if let Some(waker) = ctx.waker.take() {
-                waker.wake();
+                if let Some(waker) = &ctx.waker {
+                    waker.wake_by_ref();
+                }
+            }
+            WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE => {
+                // let size = *(lpv_status_infomation as *mut u32);
+                // println!("Status Callback -> Data Available -> {}", size);
+                ctx.status = NetworkStatus::DataAvailable;
+                if let Some(waker) = &ctx.waker {
+                    waker.wake_by_ref();
+                }
+            }
+            WINHTTP_CALLBACK_STATUS_READ_COMPLETE => {
+                ctx.buf_size = dw_status_infomation_length as usize;
+                // println!("Status Callback -> Read Complete -> {}", ctx.buf_size);
+                ctx.status = NetworkStatus::DataWritten;
+                if let Some(waker) = &ctx.waker {
+                    waker.wake_by_ref();
+                }
+            }
+            WINHTTP_CALLBACK_STATUS_REQUEST_ERROR => {
+                let result = (lpv_status_infomation as *mut WINHTTP_ASYNC_RESULT)
+                    .as_ref()
+                    .unwrap();
+                // println!(
+                //     "Status Callback -> Request Error -> {} 0x{:08X}",
+                //     result.dwError, result.dwError
+                // );
+
+                if result.dwError != ERROR_WINHTTP_OPERATION_CANCELLED {
+                    ctx.io_error = dbg!(std::io::Error::from_raw_os_error(result.dwError as i32));
+                    ctx.status = NetworkStatus::Error;
+
+                    if let Some(waker) = &ctx.waker {
+                        waker.wake_by_ref();
+                    }
+                }
+            }
+            _ => {
+                // println!(
+                //     "Status Callback -> Unknown Status -> {} 0x{:08X}",
+                //     dw_internet_status, dw_internet_status
+                // );
             }
         }
-        _ => {}
     }
 }
