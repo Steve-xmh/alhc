@@ -9,6 +9,7 @@ use std::{
     ptr::slice_from_raw_parts,
     sync::{Arc, Mutex},
     task::{Poll, Waker},
+    time::Duration,
 };
 
 use futures::{
@@ -366,7 +367,7 @@ impl Response {
         Ok(ResponseBody {
             data,
             code: status_code,
-            headers: dbg!(parsed_headers),
+            headers: parsed_headers,
         })
     }
 
@@ -497,6 +498,19 @@ impl AsyncRead for Response {
 }
 
 impl Client {
+    pub fn set_timeout(&mut self, max_timeout: Duration) {
+        unsafe {
+            let max_timeout = max_timeout.as_millis() as std::os::raw::c_int;
+            WinHttpSetTimeouts(
+                *self.h_session,
+                max_timeout,
+                max_timeout,
+                max_timeout,
+                max_timeout,
+            );
+        }
+    }
+
     pub fn request(&self, method: Method, url: &str) -> Result<Request> {
         unsafe {
             // println!("Requesting {}", url);
