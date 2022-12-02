@@ -26,15 +26,15 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug example 'macos_bindgen'",
+            "name": "Debug example 'download'",
             "cargo": {
                 "args": [
                     "build",
-                    "--example=macos_bindgen",
+                    "--example=download",
                     "--package=alhc"
                 ],
                 "filter": {
-                    "name": "macos_bindgen",
+                    "name": "download",
                     "kind": "example"
                 }
             },
@@ -44,16 +44,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in example 'macos_bindgen'",
+            "name": "Debug unit tests in example 'download'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
-                    "--example=macos_bindgen",
+                    "--example=download",
                     "--package=alhc"
                 ],
                 "filter": {
-                    "name": "macos_bindgen",
+                    "name": "download",
                     "kind": "example"
                 }
             },
@@ -91,6 +91,43 @@
                 ],
                 "filter": {
                     "name": "https",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'macos_bindgen'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=macos_bindgen",
+                    "--package=alhc"
+                ],
+                "filter": {
+                    "name": "macos_bindgen",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in example 'macos_bindgen'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--example=macos_bindgen",
+                    "--package=alhc"
+                ],
+                "filter": {
+                    "name": "macos_bindgen",
                     "kind": "example"
                 }
             },
