@@ -1,6 +1,6 @@
 [package]
 name = "alhc"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Steve Xiao <stevexmh@qq.com>"]
 homepage = "https://github.com/Steve-xmh/alhc"
 repository = "https://github.com/Steve-xmh/alhc"
@@ -12,6 +12,10 @@ readme = "README.md"
 license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc", "aarch64-pc-windows-msvc"]
 
 [features]
 default = ["serde"]
