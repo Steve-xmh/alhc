@@ -5,12 +5,7 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use crate::windows::*;
 
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
-pub use crate::macos::*;
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(target_os = "windows"))]
 compile_error!("ALHC is currently not supported by your target os.");
 
 #[cfg(not(feature = "anyhow"))]
