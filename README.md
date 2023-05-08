@@ -35,7 +35,7 @@ fn main() -> DynResult {
 
 Our little request example [`https`](./examples/https.rs) with release build can be 182 KB, which is smaller than `tinyget`'s `http` example. If we use rustc nightly feature plus `build-std` and `panic_immediate_abort`, it'll be incredibly 60 KB!
 
-Currently work in progress and only support Windows (Using WinHTTP) and macOS in progress (Using CFNetwork), linux are planned.
+Currently work in progress and only support Windows (Using WinHTTP) and macOS in progress (Using CFNetwork), linux are being planned.
 
 ## Platform Status
 

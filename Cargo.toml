@@ -1,6 +1,6 @@
 [package]
 name = "alhc"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Steve Xiao <stevexmh@qq.com>"]
 homepage = "https://github.com/Steve-xmh/alhc"
 repository = "https://github.com/Steve-xmh/alhc"
@@ -10,6 +10,14 @@ categories = ["web-programming", "web-programming::http-client"]
 edition = "2021"
 readme = "README.md"
 license = "MIT"
+
+[package.metadata.docs.rs]
+targets = [
+    "x86_64-pc-windows-msvc",
+    "i686-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin"
+]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
