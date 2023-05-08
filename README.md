@@ -8,9 +8,47 @@ What if we need async but also lightweight http client without using such a larg
 
 ALHC is a async http client library that using System library to reduce binary size and provide async request feature.
 
+HTTPS Example:
+
+```rust
+use alhc::prelude::*;
+use alhc::*;
+
+use pollster::FutureExt;
+
+fn main() -> DynResult {
+    let client = get_client_builder().build().unwrap();
+
+    let r = client
+        .post("https://httpbin.org/anything")?
+        .header("user-agent", "alhc/0.2.0")
+        .body_string("Hello World!".repeat(20))
+        .block_on()?
+        .recv_string()
+        .block_on()?;
+
+    println!("{r}");
+
+    Ok(())
+}
+```
+
 Our little request example [`https`](./examples/https.rs) with release build can be 182 KB, which is smaller than `tinyget`'s `http` example. If we use rustc nightly feature plus `build-std` and `panic_immediate_abort`, it'll be incredibly 60 KB!
 
 Currently work in progress and only support Windows (Using WinHTTP) and macOS in progress (Using CFNetwork), linux are planned.
+
+## Platform Status
+
+| Name    | Status            | Note                                             |
+| ------- | ----------------- | ------------------------------------------------ |
+| Windows | Working           |                                                  |
+| MacOS   | Working           | Maybe failed sometime or very slow (To be fixed) |
+| Linux   | Under Development |                                                  |
+
+## Features
+
+- `async_t_boxed`: Use `async-trait` instead of `async-t`, which requires nightly rustc but with zero-cost. Default is enabled.
+- ~~`serde`: Can give you the ability of send/receive json data without manually call `serde_json`. Default is disabled.~~
 
 ## Compilation binary size comparison
 

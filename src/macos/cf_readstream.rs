@@ -13,7 +13,7 @@ use core_foundation::{
     url::CFURLRef,
 };
 
-use crate::{
+use super::{
     cf_network::{CFReadStreamRef, CFStreamClientContext},
     cf_stream::CFStreamEventType,
 };

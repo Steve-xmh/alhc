@@ -1,12 +1,13 @@
 use std::{error::Error, time::Instant};
 
+use alhc::prelude::*;
 use alhc::*;
 
 use pollster::FutureExt;
 
 fn main() {
     async {
-        let client = ClientBuilder::default().build();
+        let client = get_client_builder().build().unwrap();
 
         let mut success = 0;
         let mut failed = 0;
@@ -15,10 +16,10 @@ fn main() {
 
         for i in 0..10 {
             let instant = Instant::now();
-            // println!("Requesting {}", i);
+            println!("Requesting {}", i);
             let r = client
-                .get("https://httpbin.org/anything")?
-                // .body_string("Hello World!".repeat(100))
+                .post("https://httpbin.org/anything")?
+                .body_string("Hello World!".repeat(100))
                 .await?
                 .recv_string()
                 .await;
@@ -32,7 +33,7 @@ fn main() {
             match r {
                 Ok(_) => {
                     success += 1;
-                    // println!("Request {} ok", i);
+                    println!("Request {} ok", i);
                 }
                 Err(err) => {
                     failed += 1;

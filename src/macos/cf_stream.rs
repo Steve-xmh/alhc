@@ -7,7 +7,7 @@ use core_foundation::{
     mach_port::{CFAllocatorRef, CFIndex},
 };
 
-use crate::cf_network::{CFReadStreamRef, CFWriteStreamRef};
+use super::{CFReadStreamRef, CFWriteStreamRef};
 
 pub type CFStreamEventType = CFOptionFlags;
 

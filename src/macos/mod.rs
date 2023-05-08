@@ -18,7 +18,7 @@ pub(super) mod cf_stream;
 pub(super) mod cf_url;
 pub(super) mod cf_writestream;
 
-use crate::{Method, Result};
+use crate::{DynResult, Method, ResponseBody};
 use cf_network::*;
 use cf_readstream::*;
 use cf_stream::*;
@@ -34,7 +34,7 @@ use core_foundation::{
     },
     string::CFString,
 };
-use futures::{io::Cursor, AsyncRead, AsyncReadExt};
+use futures::{AsyncRead, AsyncReadExt};
 use std::future::Future;
 
 #[link(name = "CFNetwork", kind = "framework")]
@@ -99,31 +99,18 @@ pin_project_lite::pin_project! {
     }
 }
 
-impl Request {
-    pub fn body(mut self, body: impl AsyncRead + Unpin + 'static, body_size: usize) -> Self {
+impl crate::prelude::Request for Request {
+    fn body(
+        mut self,
+        body: impl AsyncRead + Unpin + Send + Sync + 'static,
+        body_size: usize,
+    ) -> Self {
         self.body_len = body_size;
         self.read_body = Box::new(body);
         self
     }
 
-    pub fn body_string(mut self, body: String) -> Self {
-        self.body_len = body.len();
-        self.read_body = Box::new(Cursor::new(body));
-        self
-    }
-
-    pub fn body_bytes(mut self, body: Vec<u8>) -> Self {
-        self.body_len = body.len();
-        self.read_body = Box::new(Cursor::new(body));
-        self
-    }
-
-    pub fn header(self, header: &str, value: &str) -> Self {
-        // unsafe {
-        //     let header = NSString::alloc(nil).init_str(header);
-        //     let value = NSString::alloc(nil).init_str(value);
-        //     let _: id = msg_send![self.url_request, addValue: value forHTTPHeaderField: header];
-        // }
+    fn header(self, header: &str, value: &str) -> Self {
         unsafe {
             let header = CFString::new(header);
             let value = CFString::new(value);
@@ -135,14 +122,10 @@ impl Request {
         }
         self
     }
-
-    pub fn replace_header(self, header: &str, value: &str) -> Self {
-        self.header(header, value)
-    }
 }
 
 impl Future for Request {
-    type Output = Result<Response>;
+    type Output = futures::io::Result<Response>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         unsafe {
@@ -157,13 +140,11 @@ impl Future for Request {
                     kCFAllocatorDefault as *const _,
                     &mut self.req_read_stream,
                     &mut self.req_write_stream,
-                    32,
+                    8 * 1024,
                 );
 
                 if self.req_read_stream.is_null() || self.req_write_stream.is_null() {
-                    return Poll::Ready(Err(Box::new(std::io::Error::from(
-                        std::io::ErrorKind::Other,
-                    ))));
+                    return Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::Other)));
                 }
 
                 let client_context = CFStreamClientContext {
@@ -209,9 +190,7 @@ impl Future for Request {
                 );
 
                 if self.res_read_stream.is_null() {
-                    return Poll::Ready(Err(Box::new(std::io::Error::from(
-                        std::io::ErrorKind::Other,
-                    ))));
+                    return Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::Other)));
                 }
 
                 if CFReadStreamSetClient(
@@ -227,10 +206,10 @@ impl Future for Request {
                     let raw_err = CFReadStreamCopyError(self.res_read_stream);
                     let err = CFError::from_mut_void(raw_err as *mut _).to_owned();
                     CFRelease(raw_err as *mut _);
-                    return Poll::Ready(Err(Box::new(std::io::Error::new(
+                    return Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         err.to_string(),
-                    ))));
+                    )));
                 }
 
                 CFReadStreamScheduleWithRunLoop(
@@ -239,9 +218,9 @@ impl Future for Request {
                     kCFRunLoopDefaultMode,
                 );
 
-                dbg!(CFWriteStreamOpen(self.req_write_stream));
-                dbg!(CFReadStreamOpen(self.req_read_stream));
-                dbg!(CFReadStreamOpen(self.res_read_stream));
+                CFWriteStreamOpen(self.req_write_stream);
+                CFReadStreamOpen(self.req_read_stream);
+                CFReadStreamOpen(self.res_read_stream);
 
                 self.ctx.as_mut().get_unchecked_mut().status = NetworkStatus::SendingBody;
                 cx.waker().wake_by_ref();
@@ -250,7 +229,6 @@ impl Future for Request {
                 if self.buf_size <= self.read_size {
                     self.read_size = 0;
                     self.buf_size = 0;
-                    // println!("Aquiring data");
                     let project = self.project();
                     match project.read_body.poll_read(cx, project.buf) {
                         Poll::Ready(Ok(size)) => {
@@ -266,32 +244,33 @@ impl Future for Request {
                             *project.buf_size = size;
                             cx.waker().wake_by_ref();
                         }
-                        Poll::Ready(Err(err)) => return Poll::Ready(Err(Box::new(err))),
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                         Poll::Pending => return Poll::Pending,
                     }
                 } else {
-                    println!("Sending Body");
                     unsafe {
-                        if dbg!(CFWriteStreamCanAcceptBytes(self.req_write_stream)) != 0 {
+                        if CFWriteStreamCanAcceptBytes(self.req_write_stream) != 0 {
                             loop {
-                                match dbg!(CFWriteStreamWrite(
+                                match CFWriteStreamWrite(
                                     self.req_write_stream,
                                     self.buf[self.read_size..].as_ptr(),
                                     (self.buf_size - self.read_size) as isize,
-                                )) {
+                                ) {
                                     -1 => {
                                         // Error
                                         let raw_err = CFWriteStreamCopyError(self.req_write_stream);
                                         let err =
                                             CFError::from_mut_void(raw_err as *mut _).to_owned();
                                         CFRelease(raw_err as *mut _);
-                                        return Poll::Ready(Err(Box::new(std::io::Error::new(
+                                        return Poll::Ready(Err(std::io::Error::new(
                                             std::io::ErrorKind::Other,
                                             err.to_string(),
-                                        ))));
+                                        )));
                                     }
                                     0 => {
                                         // Filled, wait for buffer
+                                        // We should close write stream first to let rest data send to the read stream.
+                                        CFWriteStreamClose(self.req_write_stream);
                                         self.ctx.as_mut().get_unchecked_mut().status =
                                             NetworkStatus::Pending;
                                         break;
@@ -313,36 +292,18 @@ impl Future for Request {
                 }
             }
             NetworkStatus::BodySent => {
-                println!("Body sent, cleaning write stream");
                 unsafe {
-                    dbg!(CFWriteStreamSetClient(
-                        self.req_write_stream,
-                        0,
-                        None,
-                        std::ptr::null()
-                    ));
-                    dbg!(CFReadStreamSetClient(
-                        self.req_read_stream,
-                        0,
-                        None,
-                        std::ptr::null()
-                    ));
+                    CFWriteStreamSetClient(self.req_write_stream, 0, None, std::ptr::null());
+                    CFReadStreamSetClient(self.req_read_stream, 0, None, std::ptr::null());
                     CFWriteStreamUnscheduleFromRunLoop(
                         self.req_write_stream,
                         get_or_spawn_http_thread(),
                         kCFRunLoopDefaultMode,
                     );
-                    CFWriteStreamClose(self.req_write_stream);
                     CFRelease(self.req_write_stream as *mut _);
 
-                    dbg!(CFReadStreamSetClient(
-                        self.res_read_stream,
-                        0,
-                        None,
-                        std::ptr::null()
-                    ));
+                    CFReadStreamSetClient(self.res_read_stream, 0, None, std::ptr::null());
                 }
-                println!("Returning response");
                 return Poll::Ready(Ok(Response {
                     _req: self.req.clone(),
                     read_size: 0,
@@ -356,10 +317,10 @@ impl Future for Request {
                 }));
             }
             NetworkStatus::CFError(err) => {
-                return Poll::Ready(Err(Box::new(std::io::Error::new(
+                return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     err.to_string(),
-                ))))
+                )))
             }
             _ => unreachable!(),
         }
@@ -385,7 +346,6 @@ impl AsyncRead for Response {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
-        println!("Reading: {:?}", self.ctx.status);
         unsafe {
             let ctx = self.ctx.as_mut().get_unchecked_mut();
             if ctx.waker.is_none() {
@@ -403,15 +363,15 @@ impl AsyncRead for Response {
                         copyDescription: None,
                     };
 
-                    dbg!(CFReadStreamSetClient(
+                    CFReadStreamSetClient(
                         self.res_read_stream,
                         kCFStreamEventHasBytesAvailable
                             | kCFStreamEventErrorOccurred
                             | kCFStreamEventEndEncountered
                             | kCFStreamEventOpenCompleted,
                         Some(response_status_callback),
-                        &client_context
-                    ));
+                        &client_context,
+                    );
                 }
                 self.ctx.status = NetworkStatus::Pending;
                 Poll::Pending
@@ -480,8 +440,9 @@ impl AsyncRead for Response {
 unsafe impl Send for Response {}
 unsafe impl Sync for Response {}
 
-impl Response {
-    pub async fn recv(mut self) -> std::io::Result<ResponseBody> {
+#[async_t::async_trait]
+impl crate::prelude::Response for Response {
+    async fn recv(mut self) -> std::io::Result<ResponseBody> {
         let mut data = Vec::with_capacity(256);
         self.read_to_end(&mut data).await?;
         data.shrink_to_fit();
@@ -495,57 +456,26 @@ impl Response {
         })
     }
 
-    pub async fn recv_string(mut self) -> Result<String> {
+    async fn recv_string(mut self) -> std::io::Result<String> {
         let mut result = String::with_capacity(256);
         self.read_to_string(&mut result).await?;
         Ok(result)
     }
 
-    pub async fn recv_bytes(mut self) -> Result<Vec<u8>> {
+    async fn recv_bytes(mut self) -> std::io::Result<Vec<u8>> {
         let mut result = Vec::with_capacity(256);
         self.read_to_end(&mut result).await?;
         Ok(result)
-    }
-
-    #[cfg(feature = "serde")]
-    pub async fn recv_json<T: serde::de::DeserializeOwned>(self) -> crate::Result<T> {
-        let body = self.recv_string().await?;
-        Ok(serde_json::from_str(&body)?)
-    }
-}
-
-pub struct ResponseBody {
-    data: Vec<u8>,
-    code: u16,
-    headers: HashMap<String, String>,
-}
-
-impl ResponseBody {
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    pub fn data_string(&self) -> Cow<str> {
-        String::from_utf8_lossy(&self.data)
-    }
-
-    pub fn status_code(&self) -> u16 {
-        self.code
-    }
-
-    pub fn header(&self, header: &str) -> Option<&str> {
-        self.headers
-            .keys()
-            .find(|x| x.eq_ignore_ascii_case(header))
-            .and_then(|x| self.headers.get(x).map(String::as_str))
     }
 }
 
 #[derive(Debug)]
 pub struct Client {}
 
-impl Client {
-    pub fn request(&self, method: Method, url: &str) -> Result<Request> {
+impl crate::prelude::Client for Client {
+    type ClientRequest = Request;
+
+    fn request(&self, method: Method, url: &str) -> DynResult<Request> {
         unsafe {
             let str_url = CFString::new(url);
             let url = CFURLCreateWithString(
@@ -555,9 +485,12 @@ impl Client {
             );
 
             if url.is_null() {
+                #[cfg(not(feature = "anyhow"))]
                 return Err(Box::new(std::io::Error::from(
                     std::io::ErrorKind::InvalidInput,
                 )));
+                #[cfg(feature = "anyhow")]
+                anyhow::bail!("Failed on CFURLCreateWithString");
             }
 
             let method = CFString::from_static_string(method.as_str());
@@ -570,7 +503,10 @@ impl Client {
             );
 
             if req.is_null() {
+                #[cfg(not(feature = "anyhow"))]
                 return Err(Box::new(std::io::Error::from(std::io::ErrorKind::Other)));
+                #[cfg(feature = "anyhow")]
+                anyhow::bail!("Failed on CFHTTPMessageCreateRequest");
             }
 
             Ok(Request {
@@ -604,8 +540,6 @@ fn get_or_spawn_http_thread() -> CFRunLoopRef {
     if thread_loop.is_null() {
         let (sx, rx) = std::sync::mpsc::sync_channel::<()>(1);
 
-        println!("Creating new http run loop thread");
-
         std::thread::spawn(move || {
             unsafe {
                 let run_loop = CFRunLoopGetCurrent();
@@ -632,8 +566,6 @@ fn get_or_spawn_http_thread() -> CFRunLoopRef {
                 CFRunLoopRun();
 
                 HTTP_THREAD_LOOP.swap(std::ptr::null_mut(), Ordering::SeqCst);
-
-                println!("Http run loop thread destroyed");
             }
         });
 
@@ -646,9 +578,11 @@ fn get_or_spawn_http_thread() -> CFRunLoopRef {
     }
 }
 
-impl ClientBuilder {
-    pub fn build(self) -> Client {
-        Client {}
+impl crate::prelude::ClientBuilder for ClientBuilder {
+    type BuildClient = Client;
+
+    fn build(&self) -> crate::DynResult<Self::BuildClient> {
+        Ok(Client {})
     }
 }
 
@@ -662,20 +596,12 @@ unsafe extern "C" fn request_write_status_callback(
     let ctx = ctx.as_mut().unwrap();
     match event_type {
         kCFStreamEventCanAcceptBytes => {
-            println!(
-                "Require WriteStream Status: kCFStreamEventCanAcceptBytes {:?}",
-                ctx
-            );
             ctx.status = NetworkStatus::SendingBody;
             if let Some(waker) = ctx.waker.take() {
                 waker.wake();
             }
         }
         kCFStreamEventErrorOccurred => {
-            println!(
-                "Require WriteStream Status: kCFStreamEventErrorOccurred {:?}",
-                ctx
-            );
             let raw_err = CFWriteStreamCopyError(stream);
             let err = CFError::from_mut_void(raw_err as *mut _).to_owned();
             CFRelease(raw_err as *mut _);
@@ -698,29 +624,17 @@ unsafe extern "C" fn request_read_status_callback(
     let ctx = ctx.as_mut().unwrap();
     match event_type {
         kCFStreamEventOpenCompleted => {
-            println!(
-                "Require ReadStream Status: kCFStreamEventOpenCompleted {:?}",
-                ctx
-            );
             if let Some(waker) = ctx.waker.take() {
                 waker.wake();
             }
         }
         kCFStreamEventHasBytesAvailable => {
-            println!(
-                "Require ReadStream Status: kCFStreamEventHasBytesAvailable {:?}",
-                ctx
-            );
             ctx.status = NetworkStatus::SendingBody;
             if let Some(waker) = ctx.waker.take() {
                 waker.wake();
             }
         }
         kCFStreamEventErrorOccurred => {
-            println!(
-                "Require ReadStream Status: kCFStreamEventErrorOccurred {:?}",
-                ctx
-            );
             let raw_err = CFReadStreamCopyError(stream);
             let err = CFError::from_mut_void(raw_err as *mut _).to_owned();
             CFRelease(raw_err as *mut _);
@@ -744,29 +658,17 @@ unsafe extern "C" fn response_status_callback(
 
     match event_type {
         kCFStreamEventOpenCompleted => {
-            println!(
-                "Response Stream Status: kCFStreamEventOpenCompleted {:?}",
-                ctx
-            );
             if let Some(waker) = ctx.waker.take() {
                 waker.wake();
             }
         }
         kCFStreamEventHasBytesAvailable => {
-            println!(
-                "Response Stream Status: kCFStreamEventHasBytesAvailable {:?}",
-                ctx
-            );
             ctx.status = NetworkStatus::ReceivingData;
             if let Some(waker) = ctx.waker.take() {
                 waker.wake();
             }
         }
         kCFStreamEventErrorOccurred => {
-            println!(
-                "Response Stream Status: kCFStreamEventErrorOccurred {:?}",
-                ctx
-            );
             let raw_err = CFReadStreamCopyError(stream);
             let err = CFError::from_mut_void(raw_err as *mut _).to_owned();
             CFRelease(raw_err as *mut _);
@@ -776,10 +678,6 @@ unsafe extern "C" fn response_status_callback(
             }
         }
         kCFStreamEventEndEncountered => {
-            println!(
-                "Response Stream Status: kCFStreamEventEndEncountered {:?}",
-                ctx
-            );
             ctx.status = NetworkStatus::FinishedData;
             if let Some(waker) = ctx.waker.take() {
                 waker.wake();

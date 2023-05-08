@@ -1,12 +1,13 @@
 use std::{error::Error, sync::Arc, time::Instant};
 
+use alhc::prelude::*;
 use alhc::*;
 
 use pollster::FutureExt;
 
 fn main() {
     async {
-        let client = Arc::new(ClientBuilder::default().build());
+        let client = Arc::new(get_client_builder().build().unwrap());
 
         let mut success = 0;
         let mut failed = 0;
@@ -52,7 +53,7 @@ fn main() {
             failed
         );
 
-        Result::Ok(())
+        DynResult::Ok(())
     }
     .block_on()
     .unwrap();

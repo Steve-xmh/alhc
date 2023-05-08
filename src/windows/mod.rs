@@ -23,7 +23,7 @@ use windows_sys::Win32::{
     Networking::WinHttp::*,
 };
 
-use crate::{Method, Result};
+use crate::{Method, ResponseBody, Result};
 
 trait ToWide {
     fn to_utf16(self) -> Vec<u16>;
@@ -386,33 +386,6 @@ impl Response {
     pub async fn recv_json<T: serde::de::DeserializeOwned>(self) -> crate::Result<T> {
         let body = self.recv_string().await?;
         Ok(serde_json::from_str(&body)?)
-    }
-}
-
-pub struct ResponseBody {
-    data: Vec<u8>,
-    code: u16,
-    headers: HashMap<String, String>,
-}
-
-impl ResponseBody {
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    pub fn data_string(&self) -> Cow<str> {
-        String::from_utf8_lossy(&self.data)
-    }
-
-    pub fn status_code(&self) -> u16 {
-        self.code
-    }
-
-    pub fn header(&self, header: &str) -> Option<&str> {
-        self.headers
-            .keys()
-            .find(|x| x.eq_ignore_ascii_case(header))
-            .and_then(|x| self.headers.get(x).map(String::as_str))
     }
 }
 

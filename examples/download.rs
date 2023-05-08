@@ -3,11 +3,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use alhc::prelude::*;
 use alhc::*;
 use futures::future::join_all;
 use pollster::FutureExt;
 
-fn main() -> Result {
+fn main() -> DynResult {
     async {
         let download_url = Arc::new(std::env::args().last().unwrap_or_default());
 
@@ -21,17 +22,14 @@ fn main() -> Result {
 
         let chunk_amount = 4;
         let client = Arc::new({
-            let mut c = ClientBuilder::default().build();
+            let mut c = get_client_builder().build().unwrap();
             c.set_timeout(Duration::from_secs(2));
             c
         });
 
         println!("Downloading from url: {}", download_url);
 
-        let head_resp = client
-            .request(alhc::Method::HEAD, &download_url)?
-            .recv()
-            .await?;
+        let head_resp = client.head(&download_url)?.await?.recv().await?;
         if let Some(content_length) = head_resp
             .header("Content-Length")
             .and_then(|x| x.parse::<usize>().ok())
@@ -67,10 +65,10 @@ fn main() -> Result {
                             smol::io::copy(res, chunk_file).await?;
                             let time = time.elapsed().as_secs_f64();
                             println!("Chunk {} has finished: {}s", i, time);
-                            Result::Ok(())
+                            DynResult::Ok(())
                         };
                         match req_job.await {
-                            Ok(_) => return Result::Ok(()),
+                            Ok(_) => return DynResult::Ok(()),
                             Err(e) => {
                                 println!("Chunk {} failed to fetch, retrying: {}", i, e);
                             }
