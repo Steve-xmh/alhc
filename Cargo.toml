@@ -33,7 +33,7 @@ pollster = "0.3"
 smol = "1.3.0"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-bindgen = "*"
+bindgen = "0.65.1"
 
 [dependencies]
 futures = "0.3"
