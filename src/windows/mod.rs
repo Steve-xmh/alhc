@@ -1,9 +1,9 @@
+mod err_code;
+
 use std::{
-    borrow::Cow,
     collections::HashMap,
     ffi::{c_void, OsString},
     fmt::Debug,
-    io::ErrorKind,
     ops::Deref,
     os::windows::ffi::OsStringExt,
     pin::Pin,
@@ -13,17 +13,15 @@ use std::{
     time::Duration,
 };
 
-use futures::{
-    io::{AsyncRead, Cursor},
-    AsyncReadExt,
-};
+use crate::DynResult;
+use futures::{io::AsyncRead, AsyncReadExt};
 use std::future::Future;
 use windows_sys::Win32::{
-    Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER, WIN32_ERROR},
+    Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER},
     Networking::WinHttp::*,
 };
 
-use crate::{Method, ResponseBody, Result};
+use crate::{Method, ResponseBody};
 
 trait ToWide {
     fn to_utf16(self) -> Vec<u16>;
@@ -90,8 +88,8 @@ impl Debug for Request {
     }
 }
 
-impl Request {
-    pub fn body(
+impl crate::prelude::Request for Request {
+    fn body(
         mut self,
         body: impl AsyncRead + Unpin + Send + Sync + 'static,
         body_size: usize,
@@ -101,41 +99,7 @@ impl Request {
         self
     }
 
-    pub fn body_string(mut self, body: String) -> Self {
-        self.body_len = body.len();
-        self.body = Box::new(Cursor::new(body));
-        self
-    }
-
-    pub fn body_bytes(mut self, body: Vec<u8>) -> Self {
-        self.body_len = body.len();
-        self.body = Box::new(Cursor::new(body));
-        self
-    }
-
-    pub async fn recv(self) -> Result<ResponseBody> {
-        Ok(self.await?.recv().await?)
-    }
-
-    pub async fn recv_string(self) -> std::io::Result<String> {
-        self.await?.recv_string().await
-    }
-
-    pub async fn recv_bytes(self) -> std::io::Result<Vec<u8>> {
-        self.await?.recv_bytes().await
-    }
-
-    #[cfg(feature = "serde")]
-    pub async fn recv_json<T: serde::de::DeserializeOwned>(self) -> crate::Result<T> {
-        self.await?.recv_json().await
-    }
-
-    #[cfg(feature = "serde")]
-    pub fn body_json<T: ?Sized + serde::ser::Serialize>(self, body: &T) -> Result<Self> {
-        Ok(self.body_string(serde_json::to_string(body)?))
-    }
-
-    pub fn header(self, header: &str, value: &str) -> Self {
+    fn header(self, header: &str, value: &str) -> Self {
         let headers = format!("{}:{}", header, value);
         let headers = headers.to_utf16().as_ptr();
 
@@ -146,7 +110,7 @@ impl Request {
         self
     }
 
-    pub fn replace_header(self, header: &str, value: &str) -> Self {
+    fn replace_header(self, header: &str, value: &str) -> Self {
         let headers = format!("{}:{}", header, value);
         let headers = headers.to_utf16().as_ptr();
 
@@ -187,7 +151,7 @@ impl Future for Request {
                         self.ctx.as_mut().get_unchecked_mut() as *mut _ as usize,
                     );
                     if send_result == 0 {
-                        return Poll::Ready(resolve_io_error());
+                        return Poll::Ready(err_code::resolve_io_error());
                     }
                 }
                 Poll::Pending
@@ -210,7 +174,7 @@ impl Future for Request {
                                     std::ptr::null_mut(),
                                 );
                                 if r == 0 {
-                                    return Poll::Ready(resolve_io_error());
+                                    return Poll::Ready(err_code::resolve_io_error());
                                 }
                             }
                         }
@@ -225,7 +189,7 @@ impl Future for Request {
                 unsafe {
                     let r = WinHttpReceiveResponse(**self.h_request, std::ptr::null_mut());
                     if r == 0 {
-                        return Poll::Ready(resolve_io_error());
+                        return Poll::Ready(err_code::resolve_io_error());
                     }
                 }
                 Poll::Pending
@@ -243,7 +207,7 @@ impl Future for Request {
                         std::mem::size_of::<*const c_void>() as _,
                     );
                     if r == 0 {
-                        return Poll::Ready(resolve_io_error());
+                        return Poll::Ready(err_code::resolve_io_error());
                     }
                 }
                 Poll::Ready(Ok(Response {
@@ -333,8 +297,9 @@ pub struct Response {
     h_request: Arc<Handle>,
 }
 
-impl Response {
-    pub async fn recv(mut self) -> std::io::Result<ResponseBody> {
+#[async_t::async_trait]
+impl crate::prelude::Response for Response {
+    async fn recv(mut self) -> std::io::Result<ResponseBody> {
         let mut data = Vec::with_capacity(256);
         self.read_to_end(&mut data).await?;
         data.shrink_to_fit();
@@ -368,256 +333,19 @@ impl Response {
         })
     }
 
-    pub async fn recv_string(mut self) -> std::io::Result<String> {
+    async fn recv_string(mut self) -> std::io::Result<String> {
         let mut result = String::with_capacity(256);
         self.read_to_string(&mut result).await?;
         result.shrink_to_fit();
         Ok(result)
     }
 
-    pub async fn recv_bytes(mut self) -> std::io::Result<Vec<u8>> {
+    async fn recv_bytes(mut self) -> std::io::Result<Vec<u8>> {
         let mut result = Vec::with_capacity(256);
         self.read_to_end(&mut result).await?;
         result.shrink_to_fit();
         Ok(result)
     }
-
-    #[cfg(feature = "serde")]
-    pub async fn recv_json<T: serde::de::DeserializeOwned>(self) -> crate::Result<T> {
-        let body = self.recv_string().await?;
-        Ok(serde_json::from_str(&body)?)
-    }
-}
-
-fn resolve_io_error_from_error_code<T>(code: WIN32_ERROR) -> std::io::Result<T> {
-    match code {
-        ERROR_WINHTTP_AUTODETECTION_FAILED => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_AUTODETECTION_FAILED: 12180",
-        )),
-        ERROR_WINHTTP_AUTO_PROXY_SERVICE_ERROR => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_AUTO_PROXY_SERVICE_ERROR: 12178",
-        )),
-        ERROR_WINHTTP_BAD_AUTO_PROXY_SCRIPT => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_BAD_AUTO_PROXY_SCRIPT: 12166",
-        )),
-        ERROR_WINHTTP_CANNOT_CALL_AFTER_OPEN => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_CANNOT_CALL_AFTER_OPEN: 12103",
-        )),
-        ERROR_WINHTTP_CANNOT_CALL_AFTER_SEND => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_CANNOT_CALL_AFTER_SEND: 12102",
-        )),
-        ERROR_WINHTTP_CANNOT_CALL_BEFORE_OPEN => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_CANNOT_CALL_BEFORE_OPEN: 12100",
-        )),
-        ERROR_WINHTTP_CANNOT_CALL_BEFORE_SEND => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_CANNOT_CALL_BEFORE_SEND: 12101",
-        )),
-        ERROR_WINHTTP_CANNOT_CONNECT => Err(std::io::Error::new(
-            ErrorKind::NotConnected,
-            "ERROR_WINHTTP_CANNOT_CONNECT: 12029",
-        )),
-        ERROR_WINHTTP_CHUNKED_ENCODING_HEADER_SIZE_OVERFLOW => Err(std::io::Error::new(
-            ErrorKind::OutOfMemory,
-            "ERROR_WINHTTP_CHUNKED_ENCODING_HEADER_SIZE_OVERFLOW: 12183",
-        )),
-        ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED: 12044",
-        )),
-        ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED_PROXY => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED_PROXY: 12187",
-        )),
-        ERROR_WINHTTP_CLIENT_CERT_NO_ACCESS_PRIVATE_KEY => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_CLIENT_CERT_NO_ACCESS_PRIVATE_KEY: 12186",
-        )),
-        ERROR_WINHTTP_CLIENT_CERT_NO_PRIVATE_KEY => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_CLIENT_CERT_NO_PRIVATE_KEY: 12185",
-        )),
-        ERROR_WINHTTP_CONNECTION_ERROR => Err(std::io::Error::new(
-            ErrorKind::ConnectionAborted,
-            "ERROR_WINHTTP_CONNECTION_ERROR: 12030",
-        )),
-        ERROR_WINHTTP_FEATURE_DISABLED => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_FEATURE_DISABLED: 12192",
-        )),
-        ERROR_WINHTTP_GLOBAL_CALLBACK_FAILED => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_GLOBAL_CALLBACK_FAILED: 12191",
-        )),
-        ERROR_WINHTTP_HEADER_ALREADY_EXISTS => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_HEADER_ALREADY_EXISTS: 12155",
-        )),
-        ERROR_WINHTTP_HEADER_COUNT_EXCEEDED => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_HEADER_COUNT_EXCEEDED: 12181",
-        )),
-        ERROR_WINHTTP_HEADER_NOT_FOUND => Err(std::io::Error::new(
-            ErrorKind::NotFound,
-            "ERROR_WINHTTP_HEADER_NOT_FOUND: 12150",
-        )),
-        ERROR_WINHTTP_HEADER_SIZE_OVERFLOW => Err(std::io::Error::new(
-            ErrorKind::OutOfMemory,
-            "ERROR_WINHTTP_HEADER_SIZE_OVERFLOW: 12182",
-        )),
-        ERROR_WINHTTP_HTTP_PROTOCOL_MISMATCH => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_HTTP_PROTOCOL_MISMATCH: 12190",
-        )),
-        ERROR_WINHTTP_INCORRECT_HANDLE_STATE => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_INCORRECT_HANDLE_STATE: 12019",
-        )),
-        ERROR_WINHTTP_INCORRECT_HANDLE_TYPE => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_INCORRECT_HANDLE_TYPE: 12018",
-        )),
-        ERROR_WINHTTP_INTERNAL_ERROR => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_INTERNAL_ERROR: 12004",
-        )),
-        ERROR_WINHTTP_INVALID_HEADER => Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "ERROR_WINHTTP_INVALID_HEADER: 12153",
-        )),
-        ERROR_WINHTTP_INVALID_OPTION => Err(std::io::Error::new(
-            ErrorKind::InvalidInput,
-            "ERROR_WINHTTP_INVALID_OPTION: 12009",
-        )),
-        ERROR_WINHTTP_INVALID_QUERY_REQUEST => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_INVALID_QUERY_REQUEST: 12154",
-        )),
-        ERROR_WINHTTP_INVALID_SERVER_RESPONSE => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_INVALID_SERVER_RESPONSE: 12152",
-        )),
-        ERROR_WINHTTP_INVALID_URL => Err(std::io::Error::new(
-            ErrorKind::InvalidInput,
-            "ERROR_WINHTTP_INVALID_URL: 12005",
-        )),
-        ERROR_WINHTTP_LOGIN_FAILURE => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_LOGIN_FAILURE: 12015",
-        )),
-        ERROR_WINHTTP_NAME_NOT_RESOLVED => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_NAME_NOT_RESOLVED: 12007",
-        )),
-        ERROR_WINHTTP_NOT_INITIALIZED => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_NOT_INITIALIZED: 12172",
-        )),
-        ERROR_WINHTTP_OPERATION_CANCELLED => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_OPERATION_CANCELLED: 12017",
-        )),
-        ERROR_WINHTTP_OPTION_NOT_SETTABLE => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_OPTION_NOT_SETTABLE: 12011",
-        )),
-        ERROR_WINHTTP_OUT_OF_HANDLES => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_OUT_OF_HANDLES: 12001",
-        )),
-        ERROR_WINHTTP_REDIRECT_FAILED => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_REDIRECT_FAILED: 12156",
-        )),
-        ERROR_WINHTTP_RESEND_REQUEST => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_RESEND_REQUEST: 12032",
-        )),
-        ERROR_WINHTTP_RESERVED_189 => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_RESERVED_189: 12189",
-        )),
-        ERROR_WINHTTP_RESPONSE_DRAIN_OVERFLOW => Err(std::io::Error::new(
-            ErrorKind::OutOfMemory,
-            "ERROR_WINHTTP_RESPONSE_DRAIN_OVERFLOW: 12184",
-        )),
-        ERROR_WINHTTP_SCRIPT_EXECUTION_ERROR => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_SCRIPT_EXECUTION_ERROR: 12177",
-        )),
-        ERROR_WINHTTP_SECURE_CERT_CN_INVALID => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_SECURE_CERT_CN_INVALID: 12038",
-        )),
-        ERROR_WINHTTP_SECURE_CERT_DATE_INVALID => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_SECURE_CERT_DATE_INVALID: 12037",
-        )),
-        ERROR_WINHTTP_SECURE_CERT_REVOKED => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_SECURE_CERT_REVOKED: 12170",
-        )),
-        ERROR_WINHTTP_SECURE_CERT_REV_FAILED => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_SECURE_CERT_REV_FAILED: 12057",
-        )),
-        ERROR_WINHTTP_SECURE_CERT_WRONG_USAGE => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_SECURE_CERT_WRONG_USAGE: 12179",
-        )),
-        ERROR_WINHTTP_SECURE_CHANNEL_ERROR => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_SECURE_CHANNEL_ERROR: 12157",
-        )),
-        ERROR_WINHTTP_SECURE_FAILURE => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_SECURE_FAILURE: 12175",
-        )),
-        ERROR_WINHTTP_SECURE_FAILURE_PROXY => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_SECURE_FAILURE_PROXY: 12188",
-        )),
-        ERROR_WINHTTP_SECURE_INVALID_CA => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_SECURE_INVALID_CA: 12045",
-        )),
-        ERROR_WINHTTP_SECURE_INVALID_CERT => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_SECURE_INVALID_CERT: 12169",
-        )),
-        ERROR_WINHTTP_SHUTDOWN => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_SHUTDOWN: 12012",
-        )),
-        ERROR_WINHTTP_TIMEOUT => Err(std::io::Error::new(
-            ErrorKind::TimedOut,
-            "ERROR_WINHTTP_TIMEOUT: 12002",
-        )),
-        ERROR_WINHTTP_UNABLE_TO_DOWNLOAD_SCRIPT => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_UNABLE_TO_DOWNLOAD_SCRIPT: 12167",
-        )),
-        ERROR_WINHTTP_UNHANDLED_SCRIPT_TYPE => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_UNHANDLED_SCRIPT_TYPE: 12176",
-        )),
-        ERROR_WINHTTP_UNRECOGNIZED_SCHEME => Err(std::io::Error::new(
-            ErrorKind::Other,
-            "ERROR_WINHTTP_UNRECOGNIZED_SCHEME: 12006",
-        )),
-
-        other => Err(std::io::Error::from_raw_os_error(other as _)),
-    }
-}
-
-fn resolve_io_error<T>() -> std::io::Result<T> {
-    resolve_io_error_from_error_code(unsafe { GetLastError() })
 }
 
 impl AsyncRead for Response {
@@ -637,7 +365,7 @@ impl AsyncRead for Response {
                     }
                     let r = WinHttpQueryDataAvailable(**self.h_request, std::ptr::null_mut());
                     if r == 0 {
-                        return Poll::Ready(resolve_io_error());
+                        return Poll::Ready(err_code::resolve_io_error());
                     }
                 }
                 Poll::Pending
@@ -654,7 +382,7 @@ impl AsyncRead for Response {
                     std::ptr::null_mut(),
                 );
                 if r == 0 {
-                    return Poll::Ready(resolve_io_error());
+                    return Poll::Ready(err_code::resolve_io_error());
                 }
                 Poll::Pending
             },
@@ -664,7 +392,7 @@ impl AsyncRead for Response {
                 } else if self.read_size >= self.ctx.buf_size {
                     let r = WinHttpQueryDataAvailable(**self.h_request, std::ptr::null_mut());
                     if r == 0 {
-                        return Poll::Ready(resolve_io_error());
+                        return Poll::Ready(err_code::resolve_io_error());
                     }
                     Poll::Pending
                 } else {
@@ -691,7 +419,38 @@ impl AsyncRead for Response {
 }
 
 impl Client {
-    pub fn set_timeout(&mut self, max_timeout: Duration) {
+    pub(crate) fn get_or_connect_connection(&self, hostname: &str) -> std::io::Result<Arc<Handle>> {
+        unsafe {
+            let mut connections = self.connections.lock().unwrap();
+            if let Some(conn) = connections.get(hostname).cloned() {
+                Ok(conn)
+            } else {
+                let hostname_w = hostname.to_utf16();
+                let h_connection = WinHttpConnect(
+                    *self.h_session,
+                    hostname_w.as_ptr(),
+                    INTERNET_DEFAULT_PORT,
+                    0,
+                );
+
+                if h_connection.is_null() {
+                    return err_code::resolve_io_error();
+                }
+
+                let conn: Arc<Handle> = Arc::new(h_connection.into());
+
+                connections.insert(hostname.to_owned(), conn.clone());
+
+                Ok(conn)
+            }
+        }
+    }
+}
+
+impl crate::prelude::Client for Client {
+    type ClientRequest = Request;
+
+    fn set_timeout(&mut self, max_timeout: Duration) {
         unsafe {
             let max_timeout = max_timeout.as_millis() as std::os::raw::c_int;
             WinHttpSetTimeouts(
@@ -704,7 +463,7 @@ impl Client {
         }
     }
 
-    pub fn request(&self, method: Method, url: &str) -> Result<Request> {
+    fn request(&self, method: Method, url: &str) -> crate::DynResult<Request> {
         unsafe {
             let url = url.to_utf16();
 
@@ -780,35 +539,7 @@ impl Client {
                 ctx: Box::pin(Default::default()),
                 h_request: Arc::new(h_request.into()),
                 buf: [0; BUF_SIZE],
-            }
-            .header("User-Agent", "alhc/0.1"))
-        }
-    }
-
-    pub(crate) fn get_or_connect_connection(&self, hostname: &str) -> std::io::Result<Arc<Handle>> {
-        unsafe {
-            let mut connections = self.connections.lock().unwrap();
-            if let Some(conn) = connections.get(hostname).cloned() {
-                Ok(conn)
-            } else {
-                let hostname_w = hostname.to_utf16();
-                let h_connection = WinHttpConnect(
-                    *self.h_session,
-                    hostname_w.as_ptr(),
-                    INTERNET_DEFAULT_PORT,
-                    0,
-                );
-
-                if h_connection.is_null() {
-                    return resolve_io_error();
-                }
-
-                let conn: Arc<Handle> = Arc::new(h_connection.into());
-
-                connections.insert(hostname.to_owned(), conn.clone());
-
-                Ok(conn)
-            }
+            })
         }
     }
 }
@@ -816,8 +547,9 @@ impl Client {
 #[derive(Debug, Clone, Default)]
 pub struct ClientBuilder {}
 
-impl ClientBuilder {
-    pub fn build(self) -> Client {
+impl crate::prelude::ClientBuilder for ClientBuilder {
+    type BuildClient = Client;
+    fn build(&self) -> DynResult<Self::BuildClient> {
         unsafe {
             let h_session = WinHttpOpen(
                 std::ptr::null(),
@@ -832,10 +564,10 @@ impl ClientBuilder {
                 &15000u32 as *const _ as *const c_void,
                 4,
             );
-            Client {
+            Ok(Client {
                 h_session: h_session.into(),
                 connections: Mutex::new(HashMap::with_capacity(16)),
-            }
+            })
         }
     }
 }
@@ -878,7 +610,7 @@ unsafe extern "system" fn status_callback(
                 if r == 0 {
                     let code = GetLastError();
                     if code != ERROR_INSUFFICIENT_BUFFER {
-                        ctx.io_error = Some(resolve_io_error::<()>().unwrap_err());
+                        ctx.io_error = Some(err_code::resolve_io_error::<()>().unwrap_err());
                         ctx.status = NetworkStatus::Error;
                         if let Some(waker) = &ctx.waker {
                             waker.wake_by_ref();
@@ -899,7 +631,7 @@ unsafe extern "system" fn status_callback(
                 );
 
                 if r == 0 {
-                    ctx.io_error = Some(resolve_io_error::<()>().unwrap_err());
+                    ctx.io_error = Some(err_code::resolve_io_error::<()>().unwrap_err());
                     ctx.status = NetworkStatus::Error;
                     if let Some(waker) = &ctx.waker {
                         waker.wake_by_ref();
@@ -950,7 +682,8 @@ unsafe extern "system" fn status_callback(
 
                 if result.dwError != ERROR_WINHTTP_OPERATION_CANCELLED {
                     ctx.io_error = Some(
-                        resolve_io_error_from_error_code::<()>(result.dwError as _).unwrap_err(),
+                        err_code::resolve_io_error_from_error_code::<()>(result.dwError as _)
+                            .unwrap_err(),
                     );
                     ctx.status = NetworkStatus::Error;
 

@@ -31,6 +31,7 @@ pub trait RequestSerdeExt: Request {
     }
 }
 
+#[cfg(feature = "serde")]
 impl<R: Request> RequestSerdeExt for R {}
 
 #[async_t::async_trait]

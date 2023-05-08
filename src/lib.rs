@@ -12,7 +12,7 @@ mod windows;
 mod macos;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-compile_error!("ALHC is currently not supported by your target os.");
+compile_error!("ALHC is currently not supported on your target os.");
 
 #[cfg(not(feature = "anyhow"))]
 pub type DynResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
