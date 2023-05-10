@@ -28,6 +28,7 @@ use core_foundation::{
     base::{kCFAllocatorDefault, CFRelease, FromMutVoid, TCFType},
     date::CFAbsoluteTimeGetCurrent,
     error::CFError,
+    number::kCFBooleanTrue,
     runloop::{
         CFRunLoopGetCurrent, __CFRunLoop, kCFRunLoopDefaultMode, CFRunLoopAddTimer, CFRunLoopRun,
         CFRunLoopTimer, CFRunLoopTimerRef,
@@ -187,6 +188,12 @@ impl Future for Request {
                     kCFAllocatorDefault as *const _,
                     **self.req,
                     self.req_read_stream,
+                );
+
+                CFReadStreamSetProperty(
+                    self.res_read_stream,
+                    kCFStreamPropertyHTTPAttemptPersistentConnection,
+                    kCFBooleanTrue as CFTypeRef,
                 );
 
                 if self.res_read_stream.is_null() {

@@ -52,4 +52,9 @@ extern "C" {
         buffer: *mut u8,
         bufferLength: CFIndex,
     ) -> CFIndex;
+    pub fn CFReadStreamSetProperty(
+        stream: CFReadStreamRef,
+        key: CFStringRef,
+        value: *const c_void,
+    ) -> Boolean;
 }
