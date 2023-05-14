@@ -4,8 +4,12 @@ use alhc::prelude::*;
 use alhc::*;
 
 use pollster::FutureExt;
+use tracing::Level;
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_max_level(Level::DEBUG)
+        .init();
     async {
         let client = Arc::new(get_client_builder().build().unwrap());
 
@@ -18,8 +22,10 @@ fn main() {
             let client = client.clone();
             async move {
                 let instant = Instant::now();
-                let r = client.get("https://httpbin.org/anything")?;
-                // println!("Requesting {}", i);
+                let r = client
+                    .post("http://httpbin.org/anything")?
+                    .body_string(format!("Requesting {}", i).repeat(8));
+                println!("Requesting {}", i);
                 let r = r.await?.recv_string().await;
                 if let Err(err) = &r {
                     println!("Request {} Error: {}", i, err);

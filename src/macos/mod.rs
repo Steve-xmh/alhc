@@ -11,14 +11,18 @@ use std::{
     },
     task::{Context, Poll, Waker},
 };
+use tracing::debug;
 
 pub(super) mod cf_network;
 pub(super) mod cf_readstream;
 pub(super) mod cf_stream;
 pub(super) mod cf_url;
 pub(super) mod cf_writestream;
+pub(super) mod system_configuration;
 
-use crate::{DynResult, Method, ResponseBody};
+use crate::{
+    macos::system_configuration::SCDynamicStoreCopyProxies, DynResult, Method, ResponseBody,
+};
 use cf_network::*;
 use cf_readstream::*;
 use cf_stream::*;
@@ -30,8 +34,8 @@ use core_foundation::{
     error::CFError,
     number::kCFBooleanTrue,
     runloop::{
-        CFRunLoopGetCurrent, __CFRunLoop, kCFRunLoopDefaultMode, CFRunLoopAddTimer, CFRunLoopRun,
-        CFRunLoopTimer, CFRunLoopTimerRef,
+        CFRunLoopGetCurrent, __CFRunLoop, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
+        CFRunLoopAddTimer, CFRunLoopRun, CFRunLoopTimer, CFRunLoopTimerRef, CFRunLoopWakeUp,
     },
     string::CFString,
 };
@@ -100,6 +104,12 @@ pin_project_lite::pin_project! {
     }
 }
 
+impl Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Request").field(&(self as *const _)).finish()
+    }
+}
+
 impl crate::prelude::Request for Request {
     fn body(
         mut self,
@@ -128,6 +138,7 @@ impl crate::prelude::Request for Request {
 impl Future for Request {
     type Output = futures::io::Result<Response>;
 
+    #[tracing::instrument(name = "Request::poll", skip(cx))]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         unsafe {
             let ctx = self.ctx.as_mut().get_unchecked_mut();
@@ -148,39 +159,39 @@ impl Future for Request {
                     return Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::Other)));
                 }
 
-                let client_context = CFStreamClientContext {
+                let client_context = Box::leak(Box::new(CFStreamClientContext {
                     version: 0,
                     info: self.ctx.as_mut().get_unchecked_mut() as *mut _ as *mut c_void,
                     retain: None,
                     release: None,
                     copyDescription: None,
-                };
+                }));
 
                 CFWriteStreamSetClient(
                     self.req_write_stream,
                     kCFStreamEventCanAcceptBytes | kCFStreamEventErrorOccurred,
                     Some(request_write_status_callback),
-                    &client_context,
+                    client_context,
                 );
-                CFReadStreamSetClient(
-                    self.req_read_stream,
-                    kCFStreamEventHasBytesAvailable
-                        | kCFStreamEventErrorOccurred
-                        | kCFStreamEventEndEncountered
-                        | kCFStreamEventOpenCompleted,
-                    Some(request_read_status_callback),
-                    &client_context,
-                );
+                // CFReadStreamSetClient(
+                //     self.req_read_stream,
+                //     kCFStreamEventHasBytesAvailable
+                //         | kCFStreamEventErrorOccurred
+                //         | kCFStreamEventEndEncountered
+                //         | kCFStreamEventOpenCompleted,
+                //     Some(request_read_status_callback),
+                //     client_context,
+                // );
 
                 CFWriteStreamScheduleWithRunLoop(
                     self.req_write_stream,
                     get_or_spawn_http_thread(),
-                    kCFRunLoopDefaultMode,
+                    kCFRunLoopCommonModes,
                 );
                 CFReadStreamScheduleWithRunLoop(
                     self.req_read_stream,
                     get_or_spawn_http_thread(),
-                    kCFRunLoopDefaultMode,
+                    kCFRunLoopCommonModes,
                 );
 
                 // We will open it when we sent the body.
@@ -190,6 +201,12 @@ impl Future for Request {
                     self.req_read_stream,
                 );
 
+                let proxy_dict = SCDynamicStoreCopyProxies(std::ptr::null_mut());
+                CFReadStreamSetProperty(
+                    self.res_read_stream,
+                    kCFStreamPropertyHTTPProxy,
+                    proxy_dict as _,
+                );
                 CFReadStreamSetProperty(
                     self.res_read_stream,
                     kCFStreamPropertyHTTPAttemptPersistentConnection,
@@ -207,7 +224,7 @@ impl Future for Request {
                         | kCFStreamEventEndEncountered
                         | kCFStreamEventOpenCompleted,
                     Some(response_status_callback),
-                    &client_context,
+                    client_context,
                 ) == 0
                 {
                     let raw_err = CFReadStreamCopyError(self.res_read_stream);
@@ -222,15 +239,17 @@ impl Future for Request {
                 CFReadStreamScheduleWithRunLoop(
                     self.res_read_stream,
                     get_or_spawn_http_thread(),
-                    kCFRunLoopDefaultMode,
+                    kCFRunLoopCommonModes,
                 );
 
                 CFWriteStreamOpen(self.req_write_stream);
                 CFReadStreamOpen(self.req_read_stream);
                 CFReadStreamOpen(self.res_read_stream);
+                CFRunLoopWakeUp(get_or_spawn_http_thread());
 
                 self.ctx.as_mut().get_unchecked_mut().status = NetworkStatus::SendingBody;
-                cx.waker().wake_by_ref();
+                // cx.waker().wake_by_ref();
+                debug!("Request Created");
             },
             NetworkStatus::SendingBody => {
                 if self.buf_size <= self.read_size {
@@ -311,6 +330,7 @@ impl Future for Request {
 
                     CFReadStreamSetClient(self.res_read_stream, 0, None, std::ptr::null());
                 }
+                debug!("Body Sent");
                 return Poll::Ready(Ok(Response {
                     _req: self.req.clone(),
                     read_size: 0,
@@ -541,6 +561,7 @@ pub struct ClientBuilder {}
 
 static HTTP_THREAD_LOOP: AtomicPtr<__CFRunLoop> = AtomicPtr::new(std::ptr::null_mut());
 
+#[tracing::instrument]
 fn get_or_spawn_http_thread() -> CFRunLoopRef {
     let thread_loop = HTTP_THREAD_LOOP.load(Ordering::SeqCst);
 
@@ -570,7 +591,9 @@ fn get_or_spawn_http_thread() -> CFRunLoopRef {
                     kCFRunLoopDefaultMode,
                 );
 
+                debug!("Created new CFRunLoop");
                 CFRunLoopRun();
+                debug!("Current CFRunLoop exited");
 
                 HTTP_THREAD_LOOP.swap(std::ptr::null_mut(), Ordering::SeqCst);
             }
@@ -594,6 +617,7 @@ impl crate::prelude::ClientBuilder for ClientBuilder {
 }
 
 #[allow(non_upper_case_globals)]
+#[tracing::instrument]
 unsafe extern "C" fn request_write_status_callback(
     stream: CFWriteStreamRef,
     event_type: CFStreamEventType,
@@ -603,12 +627,14 @@ unsafe extern "C" fn request_write_status_callback(
     let ctx = ctx.as_mut().unwrap();
     match event_type {
         kCFStreamEventCanAcceptBytes => {
+            debug!("kCFStreamEventCanAcceptBytes");
             ctx.status = NetworkStatus::SendingBody;
             if let Some(waker) = ctx.waker.take() {
                 waker.wake();
             }
         }
         kCFStreamEventErrorOccurred => {
+            debug!("kCFStreamEventErrorOccurred");
             let raw_err = CFWriteStreamCopyError(stream);
             let err = CFError::from_mut_void(raw_err as *mut _).to_owned();
             CFRelease(raw_err as *mut _);
@@ -622,6 +648,7 @@ unsafe extern "C" fn request_write_status_callback(
 }
 
 #[allow(non_upper_case_globals)]
+#[tracing::instrument]
 unsafe extern "C" fn request_read_status_callback(
     stream: CFReadStreamRef,
     event_type: CFStreamEventType,
@@ -629,6 +656,7 @@ unsafe extern "C" fn request_read_status_callback(
 ) {
     let ctx = info as *mut NetworkContext;
     let ctx = ctx.as_mut().unwrap();
+    debug!("request_read_status_callback {event_type}");
     match event_type {
         kCFStreamEventOpenCompleted => {
             if let Some(waker) = ctx.waker.take() {
@@ -655,6 +683,7 @@ unsafe extern "C" fn request_read_status_callback(
 }
 
 #[allow(non_upper_case_globals)]
+#[tracing::instrument]
 unsafe extern "C" fn response_status_callback(
     stream: CFReadStreamRef,
     event_type: CFStreamEventType,
@@ -662,6 +691,7 @@ unsafe extern "C" fn response_status_callback(
 ) {
     let ctx = info as *mut NetworkContext;
     let ctx = ctx.as_mut().unwrap();
+    debug!("response_status_callback");
 
     match event_type {
         kCFStreamEventOpenCompleted => {
