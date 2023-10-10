@@ -34,6 +34,7 @@ extern "C" {
         clientCB: CFWriteStreamClientCallBack,
         clientContext: *const CFStreamClientContext,
     ) -> Boolean;
+    pub fn CFWriteStreamGetStatus(stream: CFWriteStreamRef) -> CFIndex;
     pub fn CFWriteStreamScheduleWithRunLoop(
         stream: CFWriteStreamRef,
         runLoop: CFRunLoopRef,

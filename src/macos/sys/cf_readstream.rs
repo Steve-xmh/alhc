@@ -34,6 +34,7 @@ extern "C" {
         clientCB: CFReadStreamClientCallBack,
         clientContext: *const CFStreamClientContext,
     ) -> Boolean;
+    pub fn CFReadStreamGetStatus(stream: CFReadStreamRef) -> CFIndex;
     pub fn CFReadStreamScheduleWithRunLoop(
         stream: CFReadStreamRef,
         runLoop: CFRunLoopRef,
@@ -45,6 +46,7 @@ extern "C" {
         runLoopMode: CFRunLoopMode,
     );
     pub fn CFReadStreamOpen(stream: CFReadStreamRef) -> Boolean;
+    pub fn CFReadStreamClose(stream: CFReadStreamRef) -> Boolean;
     pub fn CFReadStreamHasBytesAvailable(stream: CFReadStreamRef) -> Boolean;
     pub fn CFReadStreamCopyError(stream: CFReadStreamRef) -> CFErrorRef;
     pub fn CFReadStreamRead(
