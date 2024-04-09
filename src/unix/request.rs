@@ -54,19 +54,28 @@ impl Future for UnixRequest {
                             cx.waker().wake_by_ref();
                             Poll::Pending
                         }
-                        Err(err) => Poll::Ready(Err(Box::from(err.to_string()))),
+                        Err(_) => Poll::Ready(Err({
+                            #[cfg(not(feature = "anyhow"))]
+                            {
+                                Box::from("isahc error")
+                            }
+                            #[cfg(feature = "anyhow")]
+                            {
+                                anyhow::anyhow!("isahc error")
+                            }
+                        })),
                     }
                 } else {
-                    Poll::Ready({
+                    Poll::Ready(Err({
                         #[cfg(not(feature = "anyhow"))]
                         {
-                            Err(Box::from("already polled"))
+                            Box::from("already polled")
                         }
                         #[cfg(feature = "anyhow")]
                         {
-                            anyhow::bail!("already polled")
+                            anyhow::anyhow!("already polled")
                         }
-                    })
+                    }))
                 }
             }
             RequestState::Recv => {
@@ -87,20 +96,29 @@ impl Future for UnixRequest {
                                 headers,
                             }))
                         }
-                        Poll::Ready(Err(err)) => Poll::Ready(Err(Box::from(err.to_string()))),
+                        Poll::Ready(Err(_)) => Poll::Ready(Err({
+                            #[cfg(not(feature = "anyhow"))]
+                            {
+                                Box::from("isahc error")
+                            }
+                            #[cfg(feature = "anyhow")]
+                            {
+                                anyhow::anyhow!("isahc error")
+                            }
+                        })),
                         Poll::Pending => Poll::Pending,
                     }
                 } else {
-                    Poll::Ready({
+                    Poll::Ready(Err({
                         #[cfg(not(feature = "anyhow"))]
                         {
-                            Err(Box::from("already polled"))
+                            Box::from("already polled")
                         }
                         #[cfg(feature = "anyhow")]
                         {
-                            anyhow::bail!("already polled")
+                            anyhow::anyhow!("already polled")
                         }
-                    })
+                    }))
                 }
             }
         }

@@ -50,7 +50,7 @@ Currently work in progress and support Windows (Using WinHTTP) and unix-like sys
 
 ## Features
 
-- `async_t_boxed`: Use `async-trait` instead of `async-t`, which requires higher version of rustc but with zero-cost. Default is disabled.
+- `async_t_boxed`: Use `async-trait` instead of `async-t`, which requires 1.75+ version of rustc but with zero-cost. Default is disabled.
 - `serde`: Can give you the ability of send/receive json data without manually call `serde_json`. Default is disabled.
 - `anyhow`: Use `Result` type from `anyhow` crate instead `Result<T, Box<dyn std::error::Error>>`. Default is disabled.
 
