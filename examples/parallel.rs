@@ -3,6 +3,7 @@ use std::{error::Error, sync::Arc, time::Instant};
 use alhc::prelude::*;
 use alhc::*;
 
+use futures::future::join_all;
 use pollster::FutureExt;
 
 fn main() {
@@ -17,7 +18,7 @@ fn main() {
 
         println!("Sending httpbin");
 
-        for (i, r) in futures::future::join_all((0..10).map(|i| {
+        for (i, r) in join_all((0..10).map(|i| {
             let client = client.clone();
             async move {
                 let instant = Instant::now();

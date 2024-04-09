@@ -13,8 +13,8 @@ use std::{
     time::Duration,
 };
 
-use crate::DynResult;
-use futures::{io::AsyncRead, AsyncReadExt};
+use crate::{prelude::*, Client, ClientBuilder, DynResult};
+use futures_lite::{io::AsyncRead, AsyncReadExt};
 use std::future::Future;
 use windows_sys::Win32::{
     Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER},
@@ -31,12 +31,6 @@ impl ToWide for &str {
     fn to_utf16(self) -> Vec<u16> {
         self.encode_utf16().chain(Some(0)).collect::<Vec<_>>()
     }
-}
-
-#[derive(Debug)]
-pub struct Client {
-    h_session: Handle,
-    connections: Mutex<HashMap<String, Arc<Handle>>>,
 }
 
 #[derive(Debug)]
@@ -297,7 +291,7 @@ pub struct Response {
     h_request: Arc<Handle>,
 }
 
-#[async_t::async_trait]
+#[cfg_attr(feature = "async_t", async_t::async_trait)]
 impl crate::prelude::Response for Response {
     async fn recv(mut self) -> std::io::Result<ResponseBody> {
         let mut data = Vec::with_capacity(256);
@@ -447,7 +441,7 @@ impl Client {
     }
 }
 
-impl crate::prelude::Client for Client {
+impl CommonClient for Client {
     type ClientRequest = Request;
 
     fn set_timeout(&mut self, max_timeout: Duration) {
@@ -544,12 +538,8 @@ impl crate::prelude::Client for Client {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ClientBuilder {}
-
-impl crate::prelude::ClientBuilder for ClientBuilder {
-    type BuildClient = Client;
-    fn build(&self) -> DynResult<Self::BuildClient> {
+impl CommonClientBuilder for ClientBuilder {
+    fn build(&self) -> DynResult<Client> {
         unsafe {
             let h_session = WinHttpOpen(
                 std::ptr::null(),

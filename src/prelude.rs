@@ -1,7 +1,7 @@
 use core::time::Duration;
-use futures::io::Cursor;
+use futures_lite::io::Cursor;
 
-use futures::AsyncRead;
+use futures_lite::AsyncRead;
 
 use crate::{Method, ResponseBody};
 
@@ -34,7 +34,8 @@ pub trait RequestSerdeExt: Request {
 #[cfg(feature = "serde")]
 impl<R: Request> RequestSerdeExt for R {}
 
-#[async_t::async_trait]
+#[cfg_attr(feature = "async_t", async_t::async_trait)]
+#[cfg_attr(not(feature = "async_t"), allow(async_fn_in_trait))]
 pub trait Response: AsyncRead
 where
     Self: Sized + Unpin,
@@ -46,13 +47,13 @@ where
     async fn recv_bytes(self) -> std::io::Result<Vec<u8>>;
 }
 
-pub trait Client {
+pub trait CommonClient {
     type ClientRequest: Request;
     fn request(&self, method: Method, url: &str) -> crate::DynResult<Self::ClientRequest>;
     fn set_timeout(&mut self, _max_timeout: Duration) {}
 }
 
-pub trait ClientExt: Client {
+pub trait ClientExt: CommonClient {
     fn get(&self, url: &str) -> crate::DynResult<Self::ClientRequest> {
         self.request(Method::GET, url)
     }
@@ -82,9 +83,8 @@ pub trait ClientExt: Client {
     }
 }
 
-impl<C: Client> ClientExt for C {}
+impl<C: CommonClient> ClientExt for C {}
 
-pub trait ClientBuilder: Default {
-    type BuildClient: Client;
-    fn build(&self) -> crate::DynResult<Self::BuildClient>;
+pub trait CommonClientBuilder: Default {
+    fn build(&self) -> crate::DynResult<crate::Client>;
 }

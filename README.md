@@ -38,20 +38,25 @@ fn main() -> DynResult {
 
 Our little request example [`https`](./examples/https.rs) with release build can be 182 KB, which is smaller than `tinyget`'s `http` example. If we use rustc nightly feature plus `build-std` and `panic_immediate_abort`, it'll be incredibly 60 KB!
 
-Currently work in progress and only support Windows (Using WinHTTP) and macOS in progress (Using CFNetwork), linux are being planned.
+Currently work in progress and support Windows (Using WinHTTP) and unix-like system (including macOS) (Using System libcurl by wraping [`isahc`](https://github.com/sagebind/isahc) crate (Will be replaced by simplier `curl` crate binding)).
 
 ## Platform Status
 
-| Name    | Status            | Note                                          |
-| ------- | ----------------- | --------------------------------------------- |
-| Windows | Working           |                                               |
-| MacOS   | Working           | Will block the thread currently (To be fixed) |
-| Linux   | Under Development |                                               |
+| Name    | Status  | Note                                                                 |
+| ------- | ------- | -------------------------------------------------------------------- |
+| Windows | Working | Maybe unstable (To be optimized)                                     |
+| macOS   | Working | Simple wrapper of [`isahc`](https://github.com/sagebind/isahc) crate |
+| Linux   | Working | Simple wrapper of [`isahc`](https://github.com/sagebind/isahc) crate |
 
 ## Features
 
-- `async_t_boxed`: Use `async-trait` instead of `async-t`, which requires nightly rustc but with zero-cost. Default is enabled.
-- ~~`serde`: Can give you the ability of send/receive json data without manually call `serde_json`. Default is disabled.~~
+- `async_t_boxed`: Use `async-trait` instead of `async-t`, which requires higher version of rustc but with zero-cost. Default is disabled.
+- `serde`: Can give you the ability of send/receive json data without manually call `serde_json`. Default is disabled.
+- `anyhow`: Use `Result` type from `anyhow` crate instead `Result<T, Box<dyn std::error::Error>>`. Default is disabled.
+
+## Minimum binary size on unix-like platform guideline
+
+For Unix-like system like linux or macOS which have builtin libcurl on almost all desktop version, you have to install all the development packages that `curl` crate needs to dynamic link these libraries. For an example, on Ubuntu, you need to install `libcurl4-openssl-dev` and `zlib1g-dev` for a dynamic linkage. Else `curl` crate will build from source and static link them and heavily impact binary size.
 
 ## Compilation binary size comparison
 
@@ -59,12 +64,12 @@ Currently work in progress and only support Windows (Using WinHTTP) and macOS in
 
 | Name                                                | Windows (x86_64) | Windows (i686) | Windows (aarch64) | macOS (x86_64) | macOS (aarch64) | Linux (x86_64) |
 | --------------------------------------------------- | ---------------: | -------------: | ----------------: | -------------: | --------------: | -------------: |
-| example `https`                                     |          397,824 |        284,160 |           296,960 |        950,512 |         992,152 |            WIP |
-| example `https` release                             |          181,760 |        187,904 |           200,192 |        336,848 |         323,048 |              / |
-| example `https` release with size optimization      |           60,416 |         52,224 |            59,392 |         89,056 |          89,944 |              / |
-| example `parallel`                                  |          520,704 |        376,320 |           393,216 |      1,130,448 |       1,192,536 |              / |
-| example `parallel` release                          |          195,072 |        211,456 |           229,888 |        353,216 |         339,576 |              / |
-| example `parallel` release with size optimization   |           66,560 |         58,880 |            66,560 |        105,440 |         106,456 |              / |
-| example `sequential`                                |          402,432 |        289,280 |           302,080 |        952,720 |         994,920 |              / |
-| example `sequential` release                        |          185,344 |        191,488 |           203,264 |        336,792 |         323,000 |              / |
-| example `sequential` release with size optimization |           62,464 |         54,784 |            60,928 |         89,016 |          89,896 |              / |
+| example `https`                                     |          397,824 |        284,160 |           296,960 |        950,512 |         992,152 |     18,051,064 |
+| example `https` release                             |          181,760 |        187,904 |           200,192 |        336,848 |         323,048 |        850,704 |
+| example `https` release with size optimization      |           60,416 |         52,224 |            59,392 |         89,056 |          89,944 |        465,480 |
+| example `parallel`                                  |          520,704 |        376,320 |           393,216 |      1,130,448 |       1,192,536 |     19,612,824 |
+| example `parallel` release                          |          195,072 |        211,456 |           229,888 |        353,216 |         339,576 |        862,992 |
+| example `parallel` release with size optimization   |           66,560 |         58,880 |            66,560 |        105,440 |         106,456 |        469,576 |
+| example `sequential`                                |          402,432 |        289,280 |           302,080 |        952,720 |         994,920 |     18,048,624 |
+| example `sequential` release                        |          185,344 |        191,488 |           203,264 |        336,792 |         323,000 |        850,704 |
+| example `sequential` release with size optimization |           62,464 |         54,784 |            60,928 |         89,016 |          89,896 |        465,480 |
