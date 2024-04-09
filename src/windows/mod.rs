@@ -122,7 +122,7 @@ impl crate::prelude::Request for Request {
 }
 
 impl Future for Request {
-    type Output = futures::io::Result<Response>;
+    type Output = futures_lite::io::Result<Response>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let status = self.ctx.status;
@@ -347,7 +347,7 @@ impl AsyncRead for Response {
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut [u8],
-    ) -> Poll<futures::io::Result<usize>> {
+    ) -> Poll<futures_lite::io::Result<usize>> {
         let status = self.ctx.status;
         self.ctx.status = NetworkStatus::Pending;
         match status {
@@ -528,7 +528,7 @@ impl CommonClient for Client {
 
             Ok(Request {
                 connection: conn,
-                body: Box::new(futures::io::empty()),
+                body: Box::new(futures_lite::io::empty()),
                 body_len: 0,
                 ctx: Box::pin(Default::default()),
                 h_request: Arc::new(h_request.into()),
