@@ -37,7 +37,7 @@ fn main() -> DynResult {
 }
 ```
 
-Our little request example [`https`](./examples/https.rs) with release build can be 182 KB, which is smaller than `tinyget`'s `http` example. If we use rustc nightly feature plus `build-std` and `panic_immediate_abort`, it'll be incredibly 60 KB!
+Our little request example [`https`](./examples/https.rs) with release build can be 182 KB, which is smaller than `tinyget`'s `http` example. If we use rustc nightly feature plus `build-std` and `panic_immediate_abort`, it'll be incredibly 65 KB!
 
 Currently work in progress and support Windows (Using WinHTTP) and unix-like system (including macOS) (Using System libcurl by wraping [`isahc`](https://github.com/sagebind/isahc) crate (Will be replaced by simplier `curl` crate binding)).
 
@@ -65,12 +65,12 @@ For Unix-like system like linux or macOS which have builtin libcurl on almost al
 
 | Name                                                | Windows (x86_64) | Windows (i686) | Windows (aarch64) | macOS (x86_64) | macOS (aarch64) | Linux (x86_64) |
 | --------------------------------------------------- | ---------------: | -------------: | ----------------: | -------------: | --------------: | -------------: |
-| example `https`                                     |          397,824 |        284,160 |           296,960 |      4,078,936 |       4,395,400 |     18,051,064 |
-| example `https` release                             |          181,760 |        187,904 |           200,192 |        729,304 |         719,192 |        850,704 |
-| example `https` release with size optimization      |           60,416 |         52,224 |            59,392 |        444,680 |         453,064 |        465,480 |
-| example `parallel`                                  |          520,704 |        376,320 |           393,216 |      4,250,296 |       4,572,120 |     19,612,824 |
-| example `parallel` release                          |          195,072 |        211,456 |           229,888 |        737,536 |         735,752 |        862,992 |
-| example `parallel` release with size optimization   |           66,560 |         58,880 |            66,560 |        452,912 |         453,112 |        469,576 |
-| example `sequential`                                |          402,432 |        289,280 |           302,080 |      4,069,368 |       4,373,352 |     18,048,624 |
-| example `sequential` release                        |          185,344 |        191,488 |           203,264 |        729,296 |         719,176 |        850,704 |
-| example `sequential` release with size optimization |           62,464 |         54,784 |            60,928 |        448,776 |         453,064 |        465,480 |
+| example `https`                                     |          468,992 |        402,944 |           296,960 |      4,078,936 |       4,395,400 |     18,051,064 |
+| example `https` release                             |          181,248 |        162,816 |           200,192 |        729,304 |         719,192 |        850,704 |
+| example `https` release with size optimization      |           75,264 |         66,048 |            59,392 |        444,680 |         453,064 |        465,480 |
+| example `parallel`                                  |          571,904 |        486,912 |           393,216 |      4,250,296 |       4,572,120 |     19,612,824 |
+| example `parallel` release                          |          190,464 |        170,496 |           229,888 |        737,536 |         735,752 |        862,992 |
+| example `parallel` release with size optimization   |           80,896 |         71,680 |            66,560 |        452,912 |         453,112 |        469,576 |
+| example `sequential`                                |          472,064 |        405,504 |           302,080 |      4,069,368 |       4,373,352 |     18,048,624 |
+| example `sequential` release                        |          182,784 |        164,864 |           203,264 |        729,296 |         719,176 |        850,704 |
+| example `sequential` release with size optimization |           76,800 |         68,096 |            60,928 |        448,776 |         453,064 |        465,480 |
