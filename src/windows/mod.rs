@@ -59,7 +59,7 @@ impl Default for NetworkContext {
 const BUF_SIZE: usize = 8 * 1024;
 
 pin_project_lite::pin_project! {
-    pub struct Request {
+    pub struct WinHTTPRequest {
         connection: Arc<Handle>,
         h_request: Arc<Handle>,
         #[pin]
@@ -70,7 +70,7 @@ pin_project_lite::pin_project! {
     }
 }
 
-impl Debug for Request {
+impl Debug for WinHTTPRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Request")
             .field("connection", &self.connection)
@@ -82,7 +82,7 @@ impl Debug for Request {
     }
 }
 
-impl crate::prelude::Request for Request {
+impl Request for WinHTTPRequest {
     fn body(
         mut self,
         body: impl AsyncRead + Unpin + Send + Sync + 'static,
@@ -121,8 +121,8 @@ impl crate::prelude::Request for Request {
     }
 }
 
-impl Future for Request {
-    type Output = futures_lite::io::Result<Response>;
+impl Future for WinHTTPRequest {
+    type Output = futures_lite::io::Result<WinHTTPResponse>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let status = self.ctx.status;
@@ -204,7 +204,7 @@ impl Future for Request {
                         return Poll::Ready(err_code::resolve_io_error());
                     }
                 }
-                Poll::Ready(Ok(Response {
+                Poll::Ready(Ok(WinHTTPResponse {
                     _connection: self.connection.clone(),
                     ctx,
                     h_request: self.h_request.clone(),
@@ -283,7 +283,7 @@ impl Drop for Handle {
     }
 }
 
-pub struct Response {
+pub struct WinHTTPResponse {
     _connection: Arc<Handle>,
     ctx: Pin<Box<NetworkContext>>,
     read_size: usize,
@@ -292,7 +292,7 @@ pub struct Response {
 }
 
 #[cfg_attr(feature = "async_t", async_t::async_trait)]
-impl crate::prelude::Response for Response {
+impl Response for WinHTTPResponse {
     async fn recv(mut self) -> std::io::Result<ResponseBody> {
         let mut data = Vec::with_capacity(256);
         self.read_to_end(&mut data).await?;
@@ -342,7 +342,7 @@ impl crate::prelude::Response for Response {
     }
 }
 
-impl AsyncRead for Response {
+impl AsyncRead for WinHTTPResponse {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -442,7 +442,7 @@ impl Client {
 }
 
 impl CommonClient for Client {
-    type ClientRequest = Request;
+    type ClientRequest = WinHTTPRequest;
 
     fn set_timeout(&mut self, max_timeout: Duration) {
         unsafe {
@@ -457,7 +457,7 @@ impl CommonClient for Client {
         }
     }
 
-    fn request(&self, method: Method, url: &str) -> crate::DynResult<Request> {
+    fn request(&self, method: Method, url: &str) -> crate::DynResult<WinHTTPRequest> {
         unsafe {
             let url = url.to_utf16();
 
@@ -526,7 +526,7 @@ impl CommonClient for Client {
                 anyhow::bail!("Failed on WinHttpSetStatusCallback: {}", GetLastError())
             }
 
-            Ok(Request {
+            Ok(WinHTTPRequest {
                 connection: conn,
                 body: Box::new(futures_lite::io::empty()),
                 body_len: 0,

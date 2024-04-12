@@ -85,6 +85,6 @@ pub trait ClientExt: CommonClient {
 
 impl<C: CommonClient> ClientExt for C {}
 
-pub trait CommonClientBuilder: Default {
+pub trait CommonClientBuilder {
     fn build(&self) -> crate::DynResult<crate::Client>;
 }

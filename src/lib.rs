@@ -8,10 +8,10 @@ pub use client::*;
 pub use method::*;
 pub use response::*;
 #[cfg(target_os = "windows")]
-mod windows;
+pub mod windows;
 
 #[cfg(unix)]
-mod unix;
+pub mod unix;
 
 #[cfg(not(any(unix, target_os = "windows")))]
 compile_error!("ALHC is currently not supported on your target os.");
