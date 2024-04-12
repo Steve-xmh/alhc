@@ -1,6 +1,6 @@
 [package]
 name = "alhc"
-version = "0.2.3"
+version = "0.3.0-alpha.1"
 authors = ["Steve Xiao <stevexmh@qq.com>"]
 homepage = "https://github.com/Steve-xmh/alhc"
 repository = "https://github.com/Steve-xmh/alhc"
@@ -14,9 +14,12 @@ license = "MIT"
 [package.metadata.docs.rs]
 targets = [
     "x86_64-pc-windows-msvc",
-    "i686-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
     "x86_64-apple-darwin",
-    "aarch64-apple-darwin"
+    "i686-pc-windows-msvc",
+    "i686-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
 ]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

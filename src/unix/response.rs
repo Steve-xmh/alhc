@@ -6,7 +6,7 @@ use isahc::AsyncBody;
 use crate::ResponseBody;
 
 pin_project_lite::pin_project! {
-pub struct UnixResponse {
+pub struct CURLResponse {
     #[pin]
     pub(crate) res: AsyncBody,
     pub(crate) code: u16,
@@ -14,7 +14,7 @@ pub struct UnixResponse {
 }
 }
 
-impl AsyncRead for UnixResponse {
+impl AsyncRead for CURLResponse {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -25,7 +25,7 @@ impl AsyncRead for UnixResponse {
 }
 
 #[cfg_attr(feature = "async_t", async_t::async_trait)]
-impl crate::prelude::Response for UnixResponse {
+impl crate::prelude::CommonResponse for CURLResponse {
     async fn recv(mut self) -> std::io::Result<ResponseBody> {
         let mut data = Vec::with_capacity(1024 * 1024);
         self.read_to_end(&mut data).await?;
@@ -34,17 +34,5 @@ impl crate::prelude::Response for UnixResponse {
             code: self.code,
             headers: self.headers,
         })
-    }
-
-    async fn recv_string(mut self) -> std::io::Result<String> {
-        let mut data = Vec::with_capacity(1024 * 1024);
-        self.read_to_end(&mut data).await?;
-        Ok(String::from_utf8_lossy(&data).into_owned())
-    }
-
-    async fn recv_bytes(mut self) -> std::io::Result<Vec<u8>> {
-        let mut data = Vec::with_capacity(1024 * 1024);
-        self.read_to_end(&mut data).await?;
-        Ok(data)
     }
 }

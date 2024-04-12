@@ -7,9 +7,9 @@ use std::{
 use futures_lite::{AsyncRead, Future, FutureExt};
 use isahc::{AsyncBody, ResponseFuture};
 
-use crate::{prelude::Request, DynResult};
+use crate::{prelude::CommonRequest, DynResult};
 
-use super::{response::UnixResponse, SHARED};
+use super::{response::CURLResponse, SHARED};
 
 #[derive(Clone, Copy)]
 enum RequestState {
@@ -17,14 +17,14 @@ enum RequestState {
     Recv,
 }
 
-pub struct UnixRequest {
+pub struct CURLRequest {
     state: RequestState,
     req_builder: Option<isahc::http::request::Builder>,
     body: Option<Box<dyn AsyncRead + Unpin + Send + Sync + 'static>>,
     res: Option<ResponseFuture<'static>>,
 }
 
-impl UnixRequest {
+impl CURLRequest {
     pub(crate) fn new(req_builder: isahc::http::request::Builder) -> Self {
         Self {
             state: RequestState::Building,
@@ -35,8 +35,8 @@ impl UnixRequest {
     }
 }
 
-impl Future for UnixRequest {
-    type Output = DynResult<UnixResponse>;
+impl Future for CURLRequest {
+    type Output = DynResult<CURLResponse>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.state {
@@ -90,7 +90,7 @@ impl Future for UnixRequest {
                                     String::from_utf8_lossy(value.as_bytes()).into_owned(),
                                 );
                             }
-                            Poll::Ready(Ok(UnixResponse {
+                            Poll::Ready(Ok(CURLResponse {
                                 res: res.into_body(),
                                 code,
                                 headers,
@@ -125,7 +125,7 @@ impl Future for UnixRequest {
     }
 }
 
-impl Request for UnixRequest {
+impl CommonRequest for CURLRequest {
     fn body(
         mut self,
         new_body: impl AsyncRead + Unpin + Send + Sync + 'static,
