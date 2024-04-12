@@ -33,15 +33,19 @@ where
 {
     /// Provide data as a body in request
     fn body(self, body: impl AsyncRead + Unpin + Send + Sync + 'static, body_size: usize) -> Self;
+    /// Provide string data as a body in request
     fn body_string(self, body: String) -> Self {
         let len = body.len();
         self.body(Cursor::new(body), len)
     }
+    /// Provide binary data as a body in request
     fn body_bytes(self, body: Vec<u8>) -> Self {
         let len = body.len();
         self.body(Cursor::new(body), len)
     }
+    /// Add a header value, will keep exists same header.
     fn header(self, header: &str, value: &str) -> Self;
+    /// Replace a header value, add if not exists.
     fn replace_header(self, header: &str, value: &str) -> Self {
         self.header(header, value)
     }
@@ -86,6 +90,22 @@ where
     }
 }
 
+#[cfg(feature = "serde")]
+#[cfg_attr(feature = "async_t", async_t::async_trait)]
+#[cfg_attr(not(feature = "async_t"), allow(async_fn_in_trait))]
+/// A trait that allows you to receive json data and deserialize data into
+/// a struct that implemented [`serde::ser::Serialize`].
+pub trait CommonResponseSerdeExt: CommonResponse {
+    /// Convenient method to receive data as a json data and deserialize data
+    /// into a struct.
+    async fn recv_json<T: ?Sized + serde::de::DeserializeOwned>(self) -> crate::DynResult<T> {
+        Ok(serde_json::from_str(&self.recv_string().await?)?)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<R: CommonResponse> CommonResponseSerdeExt for R {}
+
 /// A trait that all [`Client`] will implement, allow you to send request and
 /// set some options for it.
 pub trait CommonClient {
@@ -94,7 +114,7 @@ pub trait CommonClient {
     /// [`CommonRequest`] implementation.
     fn request(&self, method: Method, url: &str) -> crate::DynResult<Self::ClientRequest>;
     /// Set connection timeout for new client.
-    /// 
+    ///
     /// Maybe no effect due to the implementation on platform.
     fn set_timeout(&mut self, _max_timeout: Duration) {}
 }
