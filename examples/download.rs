@@ -77,7 +77,7 @@ fn main() -> DynResult {
                 });
             }
             let r = join_all(chunk_jobs).await;
-            let r = r.into_iter().all(|b| dbg!(b).is_ok());
+            let r = r.into_iter().all(|b| b.is_ok());
             if r {
                 println!("All chunk downloaded successfully, concating into one file");
                 let time = Instant::now();

@@ -4,6 +4,7 @@
 //!
 //! Documentation: <https://learn.microsoft.com/en-us/windows/win32/WinHttp/winhttp-start-page>
 
+mod callback;
 mod err_code;
 mod request;
 mod response;
@@ -17,17 +18,17 @@ use std::{
     ops::Deref,
     os::windows::ffi::OsStringExt,
     ptr::slice_from_raw_parts,
-    sync::{Arc, Mutex},
+    sync::{
+        mpsc::{Receiver, SyncSender},
+        Arc, Mutex,
+    },
     task::{Poll, Waker},
     time::Duration,
 };
 
 use crate::{prelude::*, Client, ClientBuilder, DynResult};
 
-use windows_sys::Win32::{
-    Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER},
-    Networking::WinHttp::*,
-};
+use windows_sys::Win32::{Foundation::GetLastError, Networking::WinHttp::*};
 
 use crate::Method;
 
@@ -42,49 +43,38 @@ impl ToWide for &str {
 }
 
 #[derive(Debug)]
-struct NetworkContext {
-    waker: Option<Waker>,
-    status: NetworkStatus,
-    io_error: Option<std::io::Error>,
-    raw_headers: String,
-    buf_size: usize,
+enum WinHTTPCallbackEvent {
+    WriteCompleted,
+    RawHeadersReceived(String),
+    DataAvailable,
+    DataWritten,
+    Error(std::io::Error),
 }
 
-impl Default for NetworkContext {
-    fn default() -> Self {
-        Self {
-            waker: None,
-            status: NetworkStatus::Init,
-            io_error: None,
-            raw_headers: String::default(),
-            buf_size: 0,
-        }
+#[derive(Debug)]
+struct NetworkContext {
+    waker: Option<Waker>,
+    buf_size: usize,
+    callback_sender: SyncSender<WinHTTPCallbackEvent>,
+}
+
+impl NetworkContext {
+    fn new() -> (Self, Receiver<WinHTTPCallbackEvent>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        (
+            Self {
+                waker: None,
+                buf_size: 0,
+                callback_sender: tx,
+            },
+            rx,
+        )
     }
 }
 
 // According to WinHTTP documention, buffer should be at least 8KB.
 // https://learn.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpreaddata#remarks
 const BUF_SIZE: usize = 8 * 1024;
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-enum NetworkStatus {
-    Init = 0,
-    Pending,
-    Error,
-    // For Requests
-    WriteCompleted,
-    BodySent,
-    HeadersReceived,
-    // For Responses
-    DataAvailable,
-    DataWritten,
-}
-
-impl Default for NetworkStatus {
-    fn default() -> Self {
-        Self::Init
-    }
-}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Handle(*mut c_void);
@@ -143,7 +133,7 @@ impl Client {
                 );
 
                 if h_connection.is_null() {
-                    return err_code::resolve_io_error();
+                    return Err(err_code::resolve_io_error());
                 }
 
                 let conn: Arc<Handle> = Arc::new(h_connection.into());
@@ -229,7 +219,7 @@ impl CommonClient for Client {
 
             let r = WinHttpSetStatusCallback(
                 h_request,
-                Some(status_callback),
+                Some(callback::status_callback),
                 WINHTTP_CALLBACK_FLAG_ALL_NOTIFICATIONS,
                 0,
             );
@@ -241,13 +231,16 @@ impl CommonClient for Client {
                 anyhow::bail!("Failed on WinHttpSetStatusCallback: {}", GetLastError())
             }
 
+            let (ctx, rx) = NetworkContext::new();
+
             Ok(WinHTTPRequest {
-                connection: conn,
+                _connection: conn,
                 body: Box::new(futures_lite::io::empty()),
                 body_len: 0,
-                ctx: Box::pin(Default::default()),
+                ctx: Box::pin(ctx),
                 h_request: Arc::new(h_request.into()),
-                buf: [0; BUF_SIZE],
+                callback_receiver: rx,
+                buf: Box::pin([0; BUF_SIZE]),
             })
         }
     }
@@ -273,131 +266,6 @@ impl CommonClientBuilder for ClientBuilder {
                 h_session: h_session.into(),
                 connections: Mutex::new(HashMap::with_capacity(16)),
             })
-        }
-    }
-}
-
-unsafe extern "system" fn status_callback(
-    h_request: *mut c_void,
-    dw_context: usize,
-    dw_internet_status: u32,
-    lpv_status_infomation: *mut c_void,
-    dw_status_infomation_length: u32,
-) {
-    let ctx = dw_context as *mut NetworkContext;
-
-    if let Some(ctx) = ctx.as_mut() {
-        match dw_internet_status {
-            WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE => {
-                ctx.status = NetworkStatus::WriteCompleted;
-                if let Some(waker) = &ctx.waker {
-                    waker.wake_by_ref();
-                }
-            }
-            WINHTTP_CALLBACK_STATUS_WRITE_COMPLETE => {
-                ctx.status = NetworkStatus::WriteCompleted;
-                if let Some(waker) = &ctx.waker {
-                    waker.wake_by_ref();
-                }
-            }
-            WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE => {
-                let mut header_size = 0;
-
-                let r = WinHttpQueryHeaders(
-                    h_request,
-                    WINHTTP_QUERY_RAW_HEADERS_CRLF,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    &mut header_size,
-                    std::ptr::null_mut(),
-                );
-
-                if r == 0 {
-                    let code = GetLastError();
-                    if code != ERROR_INSUFFICIENT_BUFFER {
-                        ctx.io_error = Some(err_code::resolve_io_error::<()>().unwrap_err());
-                        ctx.status = NetworkStatus::Error;
-                        if let Some(waker) = &ctx.waker {
-                            waker.wake_by_ref();
-                        }
-                        return;
-                    }
-                }
-
-                let mut header_data = vec![0u16; header_size as _];
-
-                let r = WinHttpQueryHeaders(
-                    h_request,
-                    WINHTTP_QUERY_RAW_HEADERS_CRLF,
-                    std::ptr::null(),
-                    header_data.as_mut_ptr() as *mut _,
-                    &mut header_size,
-                    std::ptr::null_mut(),
-                );
-
-                if r == 0 {
-                    ctx.io_error = Some(err_code::resolve_io_error::<()>().unwrap_err());
-                    ctx.status = NetworkStatus::Error;
-                    if let Some(waker) = &ctx.waker {
-                        waker.wake_by_ref();
-                    }
-                    return;
-                }
-
-                let header_data = OsString::from_wide(&header_data)
-                    .to_string_lossy()
-                    .trim_end_matches('\0')
-                    .to_string();
-
-                ctx.raw_headers = header_data;
-
-                ctx.status = NetworkStatus::HeadersReceived;
-
-                if let Some(waker) = &ctx.waker {
-                    waker.wake_by_ref();
-                }
-            }
-            WINHTTP_CALLBACK_STATUS_RECEIVING_RESPONSE => {
-                if let Some(waker) = &ctx.waker {
-                    waker.wake_by_ref();
-                }
-            }
-            WINHTTP_CALLBACK_STATUS_CONNECTION_CLOSED => {
-                if let Some(waker) = &ctx.waker {
-                    waker.wake_by_ref();
-                }
-            }
-            WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE => {
-                ctx.status = NetworkStatus::DataAvailable;
-                if let Some(waker) = &ctx.waker {
-                    waker.wake_by_ref();
-                }
-            }
-            WINHTTP_CALLBACK_STATUS_READ_COMPLETE => {
-                ctx.buf_size = dw_status_infomation_length as usize;
-                ctx.status = NetworkStatus::DataWritten;
-                if let Some(waker) = &ctx.waker {
-                    waker.wake_by_ref();
-                }
-            }
-            WINHTTP_CALLBACK_STATUS_REQUEST_ERROR => {
-                let result = (lpv_status_infomation as *mut WINHTTP_ASYNC_RESULT)
-                    .as_ref()
-                    .unwrap();
-
-                if result.dwError != ERROR_WINHTTP_OPERATION_CANCELLED {
-                    ctx.io_error = Some(
-                        err_code::resolve_io_error_from_error_code::<()>(result.dwError as _)
-                            .unwrap_err(),
-                    );
-                    ctx.status = NetworkStatus::Error;
-
-                    if let Some(waker) = &ctx.waker {
-                        waker.wake_by_ref();
-                    }
-                }
-            }
-            _ => {}
         }
     }
 }

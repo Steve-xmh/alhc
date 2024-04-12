@@ -9,12 +9,21 @@ pub struct ResponseBody {
 }
 
 impl ResponseBody {
+    pub fn into_data(self) -> Vec<u8> {
+        self.data
+    }
+
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
     pub fn data_string(&self) -> Cow<str> {
         String::from_utf8_lossy(&self.data)
+    }
+
+    #[cfg(feature = "serde")]
+    pub fn data_json<T: ?Sized + serde::de::DeserializeOwned>(self) -> crate::DynResult<T> {
+        Ok(serde_json::from_slice(&self.data)?)
     }
 
     pub fn status_code(&self) -> u16 {
