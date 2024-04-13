@@ -138,23 +138,25 @@ impl Future for WinHTTPRequest {
                     std::mem::swap(&mut ctx, &mut self.ctx);
                     std::mem::swap(&mut rx, &mut self.callback_receiver);
                     ctx.waker = None;
+                    ctx.buf_size = usize::MAX;
                     Poll::Ready(Ok(WinHTTPResponse {
                         _connection: self._connection.clone(),
                         h_request: self.h_request.clone(),
                         ctx,
                         read_size: 0,
+                        total_read_size: 0,
                         buf: Box::pin([0; BUF_SIZE]),
                         raw_headers,
                         callback_receiver: rx,
                     }))
                 }
-                WinHTTPCallbackEvent::Error(_err) => {
-                    Poll::Ready(Err(std::io::ErrorKind::Other.into()))
-                }
+                WinHTTPCallbackEvent::Error(err) => Poll::Ready(Err(err)),
                 _ => unreachable!(),
             },
             Err(TryRecvError::Empty) => Poll::Pending,
-            Err(TryRecvError::Disconnected) => Poll::Ready(Err(std::io::ErrorKind::Other.into())),
+            Err(TryRecvError::Disconnected) => {
+                Poll::Ready(Err(std::io::Error::other("channel has been disconnected")))
+            }
         }
     }
 }

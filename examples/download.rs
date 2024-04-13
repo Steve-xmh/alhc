@@ -1,7 +1,4 @@
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Instant};
 
 use alhc::prelude::*;
 use alhc::*;
@@ -22,9 +19,8 @@ fn main() -> DynResult {
 
         let chunk_amount = 4;
         let client = Arc::new({
-            let mut c = get_client_builder().build().unwrap();
-            c.set_timeout(Duration::from_secs(2));
-            c
+            // c.set_timeout(Duration::from_secs(2));
+            get_client_builder().build().unwrap()
         });
 
         println!("Downloading from url: {}", download_url);
@@ -53,8 +49,9 @@ fn main() -> DynResult {
                         let req_job = async {
                             println!("Chunk {} has started: {}-{}", i, start_pos, end_pos);
                             let time = Instant::now();
-                            let req =
-                                req.header("Range", &format!("bytes={}-{}", start_pos, end_pos));
+                            let req = req
+                                .header("Range", &format!("bytes={}-{}", start_pos, end_pos))
+                                .header("User-Agent", "alhc/0.1.0");
                             let res = req.await?;
                             let chunk_file = smol::fs::OpenOptions::new()
                                 .create(true)
@@ -81,18 +78,10 @@ fn main() -> DynResult {
             if r {
                 println!("All chunk downloaded successfully, concating into one file");
                 let time = Instant::now();
-                let mut result = smol::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .open("test.bin")
-                    .await?;
+                let mut result = smol::fs::File::create("test.bin").await?;
                 for i in 0..chunk_amount {
-                    let chunk_file = smol::fs::OpenOptions::new()
-                        .truncate(true)
-                        .read(true)
-                        .open(format!("test.chunk.{}.tmp", i))
-                        .await?;
+                    println!("Concatenating chunk: {}", i);
+                    let chunk_file = smol::fs::File::open(format!("test.chunk.{}.tmp", i)).await?;
                     smol::io::copy(chunk_file, &mut result).await?;
                 }
                 let time = time.elapsed().as_secs_f64();

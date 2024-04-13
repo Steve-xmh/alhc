@@ -126,6 +126,7 @@ pub unsafe extern "system" fn status_callback(
             }
             WINHTTP_CALLBACK_STATUS_READ_COMPLETE => {
                 ctx.buf_size = dw_status_infomation_length as usize;
+                ctx.has_completed = ctx.buf_size == 0;
                 let _ = ctx.callback_sender.send(WinHTTPCallbackEvent::DataWritten);
                 if let Some(waker) = &ctx.waker {
                     waker.wake_by_ref();

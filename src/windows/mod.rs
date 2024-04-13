@@ -19,7 +19,7 @@ use std::{
     os::windows::ffi::OsStringExt,
     ptr::slice_from_raw_parts,
     sync::{
-        mpsc::{Receiver, SyncSender},
+        mpsc::{Receiver, Sender},
         Arc, Mutex,
     },
     task::{Poll, Waker},
@@ -55,16 +55,18 @@ enum WinHTTPCallbackEvent {
 struct NetworkContext {
     waker: Option<Waker>,
     buf_size: usize,
-    callback_sender: SyncSender<WinHTTPCallbackEvent>,
+    has_completed: bool,
+    callback_sender: Sender<WinHTTPCallbackEvent>,
 }
 
 impl NetworkContext {
     fn new() -> (Self, Receiver<WinHTTPCallbackEvent>) {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (tx, rx) = std::sync::mpsc::channel();
         (
             Self {
                 waker: None,
                 buf_size: 0,
+                has_completed: false,
                 callback_sender: tx,
             },
             rx,

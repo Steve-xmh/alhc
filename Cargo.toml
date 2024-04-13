@@ -1,6 +1,6 @@
 [package]
 name = "alhc"
-version = "0.3.0-alpha.3"
+version = "0.3.0-alpha.4"
 authors = ["Steve Xiao <stevexmh@qq.com>"]
 homepage = "https://github.com/Steve-xmh/alhc"
 repository = "https://github.com/Steve-xmh/alhc"

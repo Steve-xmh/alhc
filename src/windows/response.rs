@@ -20,6 +20,7 @@ pub struct WinHTTPResponse {
     pub(super) ctx: Pin<Box<NetworkContext>>,
     pub(super) buf: Pin<Box<[u8; BUF_SIZE]>>,
     pub(super) read_size: usize,
+    pub(super) total_read_size: usize,
     pub(super) callback_receiver: Receiver<WinHTTPCallbackEvent>,
 }
 
@@ -73,6 +74,9 @@ impl AsyncRead for WinHTTPResponse {
                 return Poll::Ready(Err(resolve_io_error()));
             }
         }
+        if self.ctx.has_completed {
+            return Poll::Ready(Ok(0));
+        }
         if self.ctx.buf_size != usize::MAX && self.read_size < self.ctx.buf_size {
             let read_size = self
                 .ctx
@@ -81,6 +85,7 @@ impl AsyncRead for WinHTTPResponse {
                 .min(self.ctx.buf_size - self.read_size);
             buf[..read_size].copy_from_slice(&self.buf[self.read_size..self.read_size + read_size]);
             self.read_size += read_size;
+            self.total_read_size += read_size;
             return Poll::Ready(Ok(read_size));
         }
         match self.callback_receiver.try_recv() {
@@ -117,16 +122,16 @@ impl AsyncRead for WinHTTPResponse {
                             Poll::Pending
                         }
                     }
-                    WinHTTPCallbackEvent::Error(_err) => {
-                        Poll::Ready(Err(std::io::ErrorKind::Other.into()))
-                    }
+                    WinHTTPCallbackEvent::Error(err) => Poll::Ready(Err(err)),
                     _ => unreachable!(),
                 };
                 cx.waker().wake_by_ref();
                 result
             }
             Err(TryRecvError::Empty) => Poll::Pending,
-            Err(TryRecvError::Disconnected) => Poll::Ready(Err(std::io::ErrorKind::Other.into())),
+            Err(TryRecvError::Disconnected) => {
+                Poll::Ready(Err(std::io::Error::other("channel has been disconnected")))
+            }
         }
     }
 }
