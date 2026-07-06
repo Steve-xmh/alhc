@@ -26,6 +26,7 @@ targets = [
 
 [features]
 default = []
+async_t = ["dep:async_t"]
 async_t_boxed = ["dep:async_t", "async_t/boxed"]
 serde = ["dep:serde", "dep:serde_json"]
 anyhow = ["dep:anyhow"]
@@ -36,20 +37,13 @@ windows-sys = { version = "0.52", features = [
     "Win32_Networking_WinHttp",
 ]}
 
-
-[target.'cfg(unix)'.dependencies]
-once_cell = "1"
-
-[target.'cfg(unix)'.dependencies.isahc]
-version = "1.7"
-default-features = false
+[build-dependencies]
+cc = "1"
 
 [dev-dependencies]
 futures = "0.3"
 pollster = "0.3"
 smol = "2.0"
-tracing = "0.1.37"
-tracing-subscriber = "0.3.17"
 
 [dependencies]
 futures-lite = "2.3"

@@ -1,15 +1,11 @@
 use std::{error::Error, sync::Arc, time::Instant};
 
 use alhc::prelude::*;
-use alhc::*;
 
 use futures::future::join_all;
 use pollster::FutureExt;
 
 fn main() {
-    // tracing_subscriber::fmt()
-    //     .with_max_level(Level::DEBUG)
-    //     .init();
     async {
         let client = Arc::new(get_client_builder().build().unwrap());
 

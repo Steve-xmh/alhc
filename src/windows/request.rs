@@ -49,29 +49,30 @@ impl CommonRequest for WinHTTPRequest {
     }
 
     fn header(self, header: &str, value: &str) -> Self {
-        let headers = format!("{}:{}", header, value);
-        let headers = headers.to_utf16().as_ptr();
-
+        let line = format!("{}:{}", header, value);
+        let utf16 = line.to_utf16();
         unsafe {
-            WinHttpAddRequestHeaders(**self.h_request, headers, u32::MAX, WINHTTP_ADDREQ_FLAG_ADD);
+            WinHttpAddRequestHeaders(
+                **self.h_request,
+                utf16.as_ptr(),
+                u32::MAX,
+                WINHTTP_ADDREQ_FLAG_ADD,
+            );
         }
-
         self
     }
 
     fn replace_header(self, header: &str, value: &str) -> Self {
-        let headers = format!("{}:{}", header, value);
-        let headers = headers.to_utf16().as_ptr();
-
+        let line = format!("{}:{}", header, value);
+        let utf16 = line.to_utf16();
         unsafe {
             WinHttpAddRequestHeaders(
                 **self.h_request,
-                headers,
+                utf16.as_ptr(),
                 u32::MAX,
                 WINHTTP_ADDREQ_FLAG_REPLACE,
             );
         }
-
         self
     }
 }

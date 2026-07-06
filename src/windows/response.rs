@@ -1,6 +1,5 @@
 use futures_lite::*;
 use std::{
-    collections::HashMap,
     pin::Pin,
     sync::{
         mpsc::{Receiver, TryRecvError},
@@ -37,18 +36,18 @@ impl CommonResponse for WinHTTPResponse {
             .and_then(|x| x.split(' ').nth(1).map(|x| x.parse::<u16>().unwrap_or(0)))
             .unwrap_or(0);
 
-        let mut parsed_headers: HashMap<String, String> =
-            HashMap::with_capacity(headers_lines.size_hint().1.unwrap_or(8));
+        let mut parsed_headers: crate::response::HeaderMap = Vec::with_capacity(16);
 
         for header in headers_lines {
             if let Some((key, value)) = header.split_once(": ") {
-                let key = key.trim();
-                let value = value.trim();
-                if let Some(exist_header) = parsed_headers.get_mut(key) {
-                    exist_header.push_str("; ");
-                    exist_header.push_str(value);
+                let key = key.trim().to_owned();
+                let value = value.trim().to_owned();
+                // For duplicate headers, append with semicolon
+                if let Some(existing) = parsed_headers.iter_mut().find(|(k, _)| k == &key) {
+                    existing.1.push_str("; ");
+                    existing.1.push_str(&value);
                 } else {
-                    parsed_headers.insert(key.to_owned(), value.to_owned());
+                    parsed_headers.push((key, value));
                 }
             }
         }

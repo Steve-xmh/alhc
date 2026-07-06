@@ -109,11 +109,17 @@ impl Drop for Handle {
                 std::mem::size_of::<*const c_void>() as _,
             );
             if WinHttpCloseHandle(self.0) == 0 {
-                panic!(
-                    "Can't close handle for {:?}: {:08X}",
+                // Panicking in Drop can cause abort on double-panic.
+                // Log the error and continue instead.
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "alhc: failed to close WinHTTP handle {:?}: {:08X}",
                     self.0,
                     GetLastError()
                 );
+                // In release, the error is silently ignored (resource will
+                // be reclaimed by the OS when the process exits).
+                let _ = GetLastError();
             }
         }
     }
@@ -177,13 +183,12 @@ impl CommonClient for Client {
                 ..std::mem::zeroed()
             };
 
-            let r = WinHttpCrackUrl(url.as_ptr(), 0, 0, &mut component); // TODO: Error handling
-
-            if r == 0 {
+            if WinHttpCrackUrl(url.as_ptr(), 0, 0, &mut component) == 0 {
+                let err = std::io::Error::last_os_error();
                 #[cfg(not(feature = "anyhow"))]
-                return Err(Box::new(std::io::Error::last_os_error()));
+                return Err(Box::new(err));
                 #[cfg(feature = "anyhow")]
-                anyhow::bail!("Failed on WinHttpCrackUrl: {}", GetLastError())
+                anyhow::bail!("WinHttpCrackUrl failed: {}", err)
             }
 
             let host_name =
