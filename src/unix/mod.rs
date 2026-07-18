@@ -1,39 +1,43 @@
-//! Platform specific implementation for Unix (Linux and macOS)
+//! Unix implementation backed by the system libcurl Multi API.
 //!
-//! Currently using [`isahc` crate](https://github.com/sagebind/isahc) for compability,
-//! will be replaced by simpler code directly using [`curl` crate](https://github.com/alexcrichton/curl-rust).
+//! Each client owns one lightweight driver thread and one long-lived multi
+//! handle. All concurrent requests share that driver and libcurl's connection
+//! cache instead of creating one blocking thread per request.
 
+mod curl_bind;
+pub(crate) mod driver;
 mod request;
 mod response;
 
-pub use request::CURLRequest;
-pub use response::CURLResponse;
-
-use isahc::HttpClient;
-use once_cell::sync::Lazy;
+pub use request::CurlRequest;
+pub use response::CurlResponse;
 
 use crate::{
     prelude::{CommonClient, CommonClientBuilder},
-    Client, ClientBuilder,
+    Client, ClientBuilder, DynResult,
 };
 
-pub(super) static SHARED: Lazy<HttpClient> =
-    Lazy::new(|| HttpClient::new().expect("shared client failed to initialize"));
-
 impl CommonClient for Client {
-    type ClientRequest = CURLRequest;
+    type ClientRequest = CurlRequest;
 
-    fn request(&self, method: crate::Method, url: &str) -> crate::DynResult<Self::ClientRequest> {
-        Ok(CURLRequest::new(
-            isahc::http::request::Builder::new()
-                .method(method.as_str())
-                .uri(url),
-        ))
+    fn request(&self, method: crate::Method, url: &str) -> DynResult<Self::ClientRequest> {
+        CurlRequest::new(self.curl_driver.clone(), url, method.as_str())
     }
 }
 
 impl CommonClientBuilder for ClientBuilder {
-    fn build(&self) -> crate::DynResult<crate::Client> {
-        Ok(Client {})
+    fn build(&self) -> DynResult<Client> {
+        let curl_driver = driver::CurlDriver::new().map_err(into_dyn_error)?;
+        Ok(Client { curl_driver })
     }
+}
+
+#[cfg(not(feature = "anyhow"))]
+fn into_dyn_error(error: std::io::Error) -> Box<dyn std::error::Error> {
+    Box::new(error)
+}
+
+#[cfg(feature = "anyhow")]
+fn into_dyn_error(error: std::io::Error) -> anyhow::Error {
+    error.into()
 }

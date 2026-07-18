@@ -1,11 +1,13 @@
-use std::collections::HashMap;
-
 use std::borrow::Cow;
+
+/// A small-vector-like header storage: `Vec<(String, String)>` is more
+/// cache-friendly and smaller than `HashMap` for typical HTTP headers (<20).
+pub type HeaderMap = Vec<(String, String)>;
 
 pub struct ResponseBody {
     pub(crate) data: Vec<u8>,
     pub(crate) code: u16,
-    pub(crate) headers: HashMap<String, String>,
+    pub(crate) headers: HeaderMap,
 }
 
 impl ResponseBody {
@@ -17,12 +19,12 @@ impl ResponseBody {
         &self.data
     }
 
-    pub fn data_string(&self) -> Cow<str> {
+    pub fn data_string(&self) -> Cow<'_, str> {
         String::from_utf8_lossy(&self.data)
     }
 
     #[cfg(feature = "serde")]
-    pub fn data_json<T: ?Sized + serde::de::DeserializeOwned>(self) -> crate::DynResult<T> {
+    pub fn data_json<T: serde::de::DeserializeOwned>(self) -> crate::DynResult<T> {
         Ok(serde_json::from_slice(&self.data)?)
     }
 
@@ -30,10 +32,17 @@ impl ResponseBody {
         self.code
     }
 
+    /// Look up a header by name (case-insensitive).
+    /// Uses a single linear scan — efficient for typical header counts.
     pub fn header(&self, header: &str) -> Option<&str> {
         self.headers
-            .keys()
-            .find(|x| x.eq_ignore_ascii_case(header))
-            .and_then(|x| self.headers.get(x).map(String::as_str))
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(header))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Iterate over all headers.
+    pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 }

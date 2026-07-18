@@ -1,13 +1,11 @@
 use alhc::prelude::*;
-use alhc::*;
+use pollster::FutureExt as _;
 
-use pollster::FutureExt;
-
-fn main() -> DynResult {
-    let client = get_client_builder().build().unwrap();
+fn main() -> alhc::DynResult {
+    let client = get_client_builder().build()?;
     let data = "Hello World!".repeat(256);
 
-    let r = client
+    let body = client
         .post("https://httpbin.org/post")?
         .header("user-agent", "alhc/0.2.0")
         .body_string(data)
@@ -15,7 +13,6 @@ fn main() -> DynResult {
         .recv_string()
         .block_on()?;
 
-    println!("{r}");
-
+    println!("{body}");
     Ok(())
 }

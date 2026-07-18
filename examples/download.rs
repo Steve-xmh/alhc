@@ -1,13 +1,13 @@
 use std::{sync::Arc, time::Instant};
 
 use alhc::prelude::*;
-use alhc::*;
 use futures::future::join_all;
 use pollster::FutureExt;
 
+#[allow(clippy::needless_collect)]
 fn main() -> DynResult {
     async {
-        let download_url = Arc::new(std::env::args().last().unwrap_or_default());
+        let download_url = Arc::new(std::env::args().next_back().unwrap_or_default());
 
         if std::env::args().count() <= 1 || download_url.is_empty() {
             println!(
