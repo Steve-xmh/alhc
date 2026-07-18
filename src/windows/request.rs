@@ -9,13 +9,13 @@ use std::{
 
 use futures_lite::AsyncRead;
 use windows_sys::Win32::Networking::WinHttp::{
-    WinHttpAddRequestHeaders, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpWriteData,
-    WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_ADDREQ_FLAG_REPLACE,
+    WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_ADDREQ_FLAG_REPLACE, WinHttpAddRequestHeaders,
+    WinHttpReceiveResponse, WinHttpSendRequest, WinHttpWriteData,
 };
 
 use super::{
-    err_code::resolve_io_error, CallbackContext, CallbackEvent, RequestHandle, ToWide,
-    WinHTTPResponse, BUF_SIZE,
+    BUF_SIZE, CallbackContext, CallbackEvent, RequestHandle, ToWide, WinHTTPResponse,
+    err_code::resolve_io_error,
 };
 use crate::prelude::CommonRequest;
 

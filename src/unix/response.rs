@@ -5,7 +5,7 @@ use std::{
 
 use futures_lite::AsyncRead;
 
-use crate::{response::HeaderMap, ResponseBody};
+use crate::{ResponseBody, response::HeaderMap};
 
 pub struct CurlResponse {
     pub(crate) data: Vec<u8>,

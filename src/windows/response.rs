@@ -8,10 +8,10 @@ use futures_lite::{AsyncRead, AsyncReadExt};
 use windows_sys::Win32::Networking::WinHttp::WinHttpReadData;
 
 use super::{
+    BUF_SIZE, CallbackContext, CallbackEvent, RequestHandle,
     err_code::{resolve_io_error, resolve_io_error_from_error_code},
-    CallbackContext, CallbackEvent, RequestHandle, BUF_SIZE,
 };
-use crate::{prelude::CommonResponse, response::HeaderMap, ResponseBody};
+use crate::{ResponseBody, prelude::CommonResponse, response::HeaderMap};
 
 pub struct WinHTTPResponse {
     request: Arc<RequestHandle>,

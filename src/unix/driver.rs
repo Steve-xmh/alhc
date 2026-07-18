@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    ffi::{c_char, c_void, CString},
+    ffi::{CString, c_char, c_void},
     io::{Read, Write},
     os::{fd::AsRawFd, unix::net::UnixStream},
     sync::{Arc, Mutex, MutexGuard},
@@ -9,7 +9,7 @@ use std::{
 
 use crate::response::HeaderMap;
 
-use super::{curl_bind, CurlResponse};
+use super::{CurlResponse, curl_bind};
 
 pub(crate) type RequestResult = std::io::Result<CurlResponse>;
 

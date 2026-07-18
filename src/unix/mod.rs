@@ -13,8 +13,8 @@ pub use request::CurlRequest;
 pub use response::CurlResponse;
 
 use crate::{
-    prelude::{CommonClient, CommonClientBuilder},
     Client, ClientBuilder, DynResult,
+    prelude::{CommonClient, CommonClientBuilder},
 };
 
 impl CommonClient for Client {

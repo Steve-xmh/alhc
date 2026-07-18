@@ -11,7 +11,7 @@ pub use response::WinHTTPResponse;
 use std::{
     cell::UnsafeCell,
     collections::VecDeque,
-    ffi::{c_void, OsString},
+    ffi::{OsString, c_void},
     os::windows::ffi::OsStringExt,
     sync::{Arc, Mutex, MutexGuard, Weak},
     task::Waker,
@@ -20,7 +20,7 @@ use std::{
 
 use windows_sys::Win32::{Foundation::GetLastError, Networking::WinHttp::*};
 
-use crate::{prelude::*, Client, ClientBuilder, DynResult, Method};
+use crate::{Client, ClientBuilder, DynResult, Method, prelude::*};
 
 trait ToWide {
     fn to_utf16(self) -> Vec<u16>;
@@ -312,16 +312,18 @@ fn make_request(client: &Client, method: Method, url: &str) -> std::io::Result<W
 }
 
 unsafe fn wide_component<'a>(pointer: *const u16, length: u32) -> std::io::Result<&'a [u16]> {
-    if length == 0 {
-        return Ok(&[]);
+    unsafe {
+        if length == 0 {
+            return Ok(&[]);
+        }
+        if pointer.is_null() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "WinHttpCrackUrl returned an invalid URL component",
+            ));
+        }
+        Ok(std::slice::from_raw_parts(pointer, length as usize))
     }
-    if pointer.is_null() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "WinHttpCrackUrl returned an invalid URL component",
-        ));
-    }
-    Ok(std::slice::from_raw_parts(pointer, length as usize))
 }
 
 fn query_headers(request: &RequestHandle) -> std::io::Result<String> {

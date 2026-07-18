@@ -10,7 +10,7 @@
 //! - Concrete types: Client, ClientBuilder, Method
 
 pub use crate::response::{HeaderMap, ResponseBody};
-pub use crate::{get_client_builder, Client, ClientBuilder, DynResult, Method};
+pub use crate::{Client, ClientBuilder, DynResult, Method, get_client_builder};
 
 // Platform-specific request/response type aliases
 #[cfg(unix)]
@@ -25,8 +25,8 @@ pub use crate::windows::{WinHTTPRequest as Request, WinHTTPResponse as Response}
 // Traits below reference Method and ResponseBody from the crate root.
 use core::future::Future;
 use core::time::Duration;
-use futures_lite::io::Cursor;
 use futures_lite::AsyncRead;
+use futures_lite::io::Cursor;
 
 /// Trait for HTTP request types.
 ///

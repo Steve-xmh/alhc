@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use alhc::{prelude::*, DynResult};
+use alhc::{DynResult, prelude::*};
 
 use pollster::FutureExt;
 

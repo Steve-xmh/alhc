@@ -1,6 +1,6 @@
 //! Minimal safe wrappers around ALHC's typed C shim for libcurl.
 
-use std::ffi::{c_char, c_int, c_long, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_int, c_long, c_void};
 
 pub type EasyHandle = *mut c_void;
 pub type MultiHandle = *mut c_void;

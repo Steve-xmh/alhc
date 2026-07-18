@@ -8,7 +8,7 @@ use std::{
 
 use futures_lite::AsyncRead;
 
-use crate::{prelude::CommonRequest, unix::response::CurlResponse, DynResult};
+use crate::{DynResult, prelude::CommonRequest, unix::response::CurlResponse};
 
 use super::driver::{CurlDriver, RequestConfig, RequestState, RequestToken};
 
