@@ -7,9 +7,9 @@
 /// development headers are needed at build time. The C shim
 /// uses `extern` declarations resolved at link time.
 fn main() {
-    // Only compile the C shim on Unix targets
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os != "linux" && target_os != "macos" {
+    // Keep this condition aligned with `cfg(unix)` in the Rust modules.
+    let target_family = std::env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();
+    if target_family != "unix" {
         return;
     }
 

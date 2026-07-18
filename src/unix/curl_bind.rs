@@ -1,184 +1,213 @@
-//! Safe Rust wrappers around the C shim for libcurl.
-//!
-//! The C shim (`curl_shim.c`) provides non-variadic wrappers for
-//! `curl_easy_setopt`, avoiding the variadic calling convention
-//! issue on ARM64 (macOS) where calling a variadic C function
-//! through a Rust non-variadic function pointer would cause
-//! `va_arg` inside curl to read garbage.
-//!
-//! libcurl is linked dynamically at link time via `-lcurl`.
-//! No compile-time dependency on curl development headers is needed.
+//! Minimal safe wrappers around ALHC's typed C shim for libcurl.
 
-use std::ffi::{c_char, c_int, c_long, c_void, CStr};
+use std::ffi::{c_char, c_int, c_long, c_void, CStr, CString};
 
-// ---------------------------------------------------------------------------
-// Option constants (from curl/curl.h — stable ABI)
-// ---------------------------------------------------------------------------
+pub type EasyHandle = *mut c_void;
+pub type MultiHandle = *mut c_void;
+pub type SlistHandle = *mut c_void;
 
-pub mod opt {
-    use std::ffi::c_int;
-
-    pub const URL: c_int = 10002;
-    pub const WRITEFUNCTION: c_int = 20011;
-    pub const WRITEDATA: c_int = 10001;
-    pub const POSTFIELDS: c_int = 10015;
-    pub const POSTFIELDSIZE: c_int = 60;
-    pub const CUSTOMREQUEST: c_int = 10036;
-    pub const FOLLOWLOCATION: c_int = 52;
-    pub const MAXREDIRS: c_int = 68;
-    #[allow(dead_code)]
-    pub const HTTPHEADER: c_int = 10023;
-    pub const ACCEPT_ENCODING: c_int = 10102;
-    pub const TIMEOUT_MS: c_int = 155;
-    pub const CONNECTTIMEOUT_MS: c_int = 156;
-}
-
-// ---------------------------------------------------------------------------
-// FFI declarations — resolved from libcurl at link time
-// ---------------------------------------------------------------------------
+pub type WriteCallback = unsafe extern "C" fn(*mut c_char, usize, usize, *mut c_void) -> usize;
 
 extern "C" {
-    fn alhc_easy_init() -> *mut c_void;
-    fn alhc_easy_cleanup(h: *mut c_void);
-    fn alhc_setopt_str(h: *mut c_void, opt: c_int, s: *const c_char) -> u32;
-    fn alhc_setopt_long(h: *mut c_void, opt: c_int, v: c_long) -> u32;
-    fn alhc_setopt_ptr(h: *mut c_void, opt: c_int, p: *mut c_void) -> u32;
-    fn alhc_easy_perform(h: *mut c_void) -> u32;
-    fn alhc_easy_getinfo_code(h: *mut c_void, val: *mut c_long) -> u32;
-    fn alhc_easy_strerror(code: u32) -> *const c_char;
+    fn alhc_global_init() -> c_int;
+
+    fn alhc_easy_init() -> EasyHandle;
+    fn alhc_easy_cleanup(easy: EasyHandle);
+    fn alhc_easy_configure(
+        easy: EasyHandle,
+        url: *const c_char,
+        method: *const c_char,
+        userdata: *mut c_void,
+        slot: usize,
+        write_callback: WriteCallback,
+        header_callback: WriteCallback,
+    ) -> c_int;
+    fn alhc_easy_set_body(easy: EasyHandle, data: *const u8, len: usize) -> c_int;
+    fn alhc_easy_set_headers(
+        easy: EasyHandle,
+        headers: *const *const c_char,
+        count: usize,
+        list_out: *mut SlistHandle,
+    ) -> c_int;
+    fn alhc_slist_free(list: SlistHandle);
+    fn alhc_easy_getinfo_code(easy: EasyHandle, value: *mut c_long) -> c_int;
+    fn alhc_easy_strerror(code: c_int) -> *const c_char;
+
+    fn alhc_multi_init() -> MultiHandle;
+    fn alhc_multi_cleanup(multi: MultiHandle) -> c_int;
+    fn alhc_multi_add(multi: MultiHandle, easy: EasyHandle) -> c_int;
+    fn alhc_multi_remove(multi: MultiHandle, easy: EasyHandle) -> c_int;
+    fn alhc_multi_perform(multi: MultiHandle, running: *mut c_int) -> c_int;
+    fn alhc_multi_timeout_ms(multi: MultiHandle, timeout_ms: *mut c_int) -> c_int;
+    fn alhc_multi_wait_fd(
+        multi: MultiHandle,
+        command_fd: c_int,
+        timeout_ms: c_int,
+        numfds: *mut c_int,
+    ) -> c_int;
+    fn alhc_multi_next_done(
+        multi: MultiHandle,
+        easy_out: *mut EasyHandle,
+        result_out: *mut c_int,
+        slot_out: *mut usize,
+    ) -> c_int;
+    fn alhc_multi_strerror(code: c_int) -> *const c_char;
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+pub fn global_init() -> Result<(), CurlError> {
+    easy_ok(unsafe { alhc_global_init() })
+}
 
-/// Initialize a curl easy handle.
-pub fn easy_init() -> *mut c_void {
+pub fn easy_init() -> EasyHandle {
     unsafe { alhc_easy_init() }
 }
 
-/// Clean up a curl easy handle.
-pub unsafe fn easy_cleanup(handle: *mut c_void) {
-    alhc_easy_cleanup(handle)
+pub unsafe fn easy_cleanup(easy: EasyHandle) {
+    alhc_easy_cleanup(easy);
 }
 
-/// Set a string option (e.g. URL).
-pub fn setopt_str(handle: *mut c_void, option: c_int, value: &CStr) -> Result<(), CurlError> {
-    let code = unsafe { alhc_setopt_str(handle, option, value.as_ptr()) };
-    ok(code)
-}
-
-/// Set a long (integer) option.
-pub fn setopt_long(handle: *mut c_void, option: c_int, value: c_long) -> Result<(), CurlError> {
-    let code = unsafe { alhc_setopt_long(handle, option, value) };
-    ok(code)
-}
-
-/// Set a pointer option (e.g. WRITEDATA, HTTPHEADER).
-pub fn setopt_ptr(handle: *mut c_void, option: c_int, value: *mut c_void) -> Result<(), CurlError> {
-    let code = unsafe { alhc_setopt_ptr(handle, option, value) };
-    ok(code)
-}
-
-/// Set the write callback function.
-pub fn setopt_writefunc(
-    handle: *mut c_void,
-    func: unsafe extern "C" fn(*mut c_char, usize, usize, *mut c_void) -> usize,
+pub fn easy_configure(
+    easy: EasyHandle,
+    url: &CStr,
+    method: &CStr,
+    userdata: *mut c_void,
+    slot: usize,
+    write_callback: WriteCallback,
+    header_callback: WriteCallback,
 ) -> Result<(), CurlError> {
-    setopt_ptr(handle, opt::WRITEFUNCTION, func as *mut c_void)
+    easy_ok(unsafe {
+        alhc_easy_configure(
+            easy,
+            url.as_ptr(),
+            method.as_ptr(),
+            userdata,
+            slot,
+            write_callback,
+            header_callback,
+        )
+    })
 }
 
-/// Perform the request synchronously.
-pub fn easy_perform(handle: *mut c_void) -> Result<(), CurlError> {
-    let code = unsafe { alhc_easy_perform(handle) };
-    ok(code)
+pub fn easy_set_body(easy: EasyHandle, body: &[u8]) -> Result<(), CurlError> {
+    easy_ok(unsafe { alhc_easy_set_body(easy, body.as_ptr(), body.len()) })
 }
 
-/// Get the HTTP response status code.
-pub fn getinfo_response_code(handle: *mut c_void) -> Option<i64> {
-    let mut val: c_long = 0;
-    let code = unsafe { alhc_easy_getinfo_code(handle, &mut val) };
-    if code == 0 {
-        Some(val as i64)
-    } else {
-        None
-    }
+pub fn easy_set_headers(easy: EasyHandle, headers: &[CString]) -> Result<SlistHandle, CurlError> {
+    let pointers: Vec<*const c_char> = headers.iter().map(|header| header.as_ptr()).collect();
+    let mut list = std::ptr::null_mut();
+    easy_ok(unsafe { alhc_easy_set_headers(easy, pointers.as_ptr(), pointers.len(), &mut list) })?;
+    Ok(list)
 }
 
-/// Get a human-readable error string for a curl error code.
-pub fn easy_strerror(code: u32) -> &'static str {
-    let ptr = unsafe { alhc_easy_strerror(code) };
-    if ptr.is_null() {
-        return "unknown curl error";
-    }
-    unsafe { CStr::from_ptr(ptr) }
-        .to_str()
-        .unwrap_or("unknown curl error")
+pub unsafe fn slist_free(list: SlistHandle) {
+    alhc_slist_free(list);
 }
 
-// ---------------------------------------------------------------------------
-// Error handling
-// ---------------------------------------------------------------------------
+pub fn getinfo_response_code(easy: EasyHandle) -> Result<i64, CurlError> {
+    let mut value: c_long = 0;
+    easy_ok(unsafe { alhc_easy_getinfo_code(easy, &mut value) })?;
+    Ok(value as i64)
+}
 
-fn ok(code: u32) -> Result<(), CurlError> {
+pub fn multi_init() -> MultiHandle {
+    unsafe { alhc_multi_init() }
+}
+
+pub unsafe fn multi_cleanup(multi: MultiHandle) -> Result<(), MultiError> {
+    multi_ok(alhc_multi_cleanup(multi))
+}
+
+pub fn multi_add(multi: MultiHandle, easy: EasyHandle) -> Result<(), MultiError> {
+    multi_ok(unsafe { alhc_multi_add(multi, easy) })
+}
+
+pub fn multi_remove(multi: MultiHandle, easy: EasyHandle) -> Result<(), MultiError> {
+    multi_ok(unsafe { alhc_multi_remove(multi, easy) })
+}
+
+pub fn multi_perform(multi: MultiHandle) -> Result<c_int, MultiError> {
+    let mut running = 0;
+    multi_ok(unsafe { alhc_multi_perform(multi, &mut running) })?;
+    Ok(running)
+}
+
+pub fn multi_timeout_ms(multi: MultiHandle) -> Result<c_int, MultiError> {
+    let mut timeout = 1000;
+    multi_ok(unsafe { alhc_multi_timeout_ms(multi, &mut timeout) })?;
+    Ok(timeout)
+}
+
+pub fn multi_wait_fd(
+    multi: MultiHandle,
+    command_fd: c_int,
+    timeout_ms: c_int,
+) -> Result<c_int, MultiError> {
+    let mut numfds = 0;
+    multi_ok(unsafe { alhc_multi_wait_fd(multi, command_fd, timeout_ms, &mut numfds) })?;
+    Ok(numfds)
+}
+
+pub fn multi_next_done(multi: MultiHandle) -> Option<(EasyHandle, c_int, usize)> {
+    let mut easy = std::ptr::null_mut();
+    let mut result = 0;
+    let mut slot = usize::MAX;
+    let found = unsafe { alhc_multi_next_done(multi, &mut easy, &mut result, &mut slot) };
+    (found == 1).then_some((easy, result, slot))
+}
+
+fn easy_ok(code: c_int) -> Result<(), CurlError> {
     if code == 0 {
         Ok(())
     } else {
-        Err(CurlError::new(code))
+        Err(CurlError(code))
     }
 }
 
-/// A libcurl error.
-pub struct CurlError {
-    code: u32,
-}
-
-impl CurlError {
-    fn new(code: u32) -> Self {
-        Self { code }
-    }
-
-    #[allow(dead_code)]
-    pub fn code(&self) -> u32 {
-        self.code
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        easy_strerror(self.code)
+fn multi_ok(code: c_int) -> Result<(), MultiError> {
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(MultiError(code))
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct CurlError(pub c_int);
 
 impl std::fmt::Display for CurlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "curl error {}: {}", self.code, easy_strerror(self.code))
-    }
-}
-
-impl std::fmt::Debug for CurlError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CurlError")
-            .field("code", &self.code)
-            .field("message", &easy_strerror(self.code))
-            .finish()
+        write!(
+            f,
+            "curl error {}: {}",
+            self.0,
+            error_message(unsafe { alhc_easy_strerror(self.0) })
+        )
     }
 }
 
 impl std::error::Error for CurlError {}
 
-// ---------------------------------------------------------------------------
-// Version info (for diagnostics)
-// ---------------------------------------------------------------------------
+#[derive(Clone, Copy, Debug)]
+pub struct MultiError(pub c_int);
 
-#[allow(dead_code)]
-extern "C" {
-    fn curl_version() -> *const c_char;
+impl std::fmt::Display for MultiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "curl multi error {}: {}",
+            self.0,
+            error_message(unsafe { alhc_multi_strerror(self.0) })
+        )
+    }
 }
 
-#[allow(dead_code)]
-pub fn version_str() -> &'static str {
-    let ptr = unsafe { curl_version() };
-    if ptr.is_null() {
-        return "unknown";
+impl std::error::Error for MultiError {}
+
+fn error_message(pointer: *const c_char) -> &'static str {
+    if pointer.is_null() {
+        return "unknown libcurl error";
     }
-    unsafe { CStr::from_ptr(ptr) }.to_str().unwrap_or("unknown")
+    unsafe { CStr::from_ptr(pointer) }
+        .to_str()
+        .unwrap_or("unknown libcurl error")
 }

@@ -3,55 +3,48 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures_lite::{AsyncRead, AsyncReadExt};
+use futures_lite::AsyncRead;
 
-use crate::ResponseBody;
-
-// ---------------------------------------------------------------------------
-// CurlResponse
-// ---------------------------------------------------------------------------
+use crate::{response::HeaderMap, ResponseBody};
 
 pub struct CurlResponse {
     pub(crate) data: Vec<u8>,
+    pub(crate) position: usize,
     pub(crate) code: u16,
+    pub(crate) headers: HeaderMap,
 }
 
 impl AsyncRead for CurlResponse {
     fn poll_read(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
-        buf: &mut [u8],
+        buffer: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
-        // We own the full response data already; just serve from the buffer.
-        // Pin::get_mut gives &mut self (CurlResponse is Unpin).
         let this = self.get_mut();
-        let data = &mut this.data;
-
-        if data.is_empty() {
+        let remaining = &this.data[this.position..];
+        if remaining.is_empty() {
             return Poll::Ready(Ok(0));
         }
 
-        let len = buf.len().min(data.len());
-        buf[..len].copy_from_slice(&data[..len]);
-        data.drain(..len);
-        Poll::Ready(Ok(len))
+        let length = buffer.len().min(remaining.len());
+        buffer[..length].copy_from_slice(&remaining[..length]);
+        this.position += length;
+        Poll::Ready(Ok(length))
     }
 }
 
 #[cfg_attr(feature = "async_t", async_t::async_trait)]
 impl crate::prelude::CommonResponse for CurlResponse {
-    async fn recv(mut self) -> std::io::Result<ResponseBody> {
-        // If there's any remaining data to stream, read it.
-        // (For the curl implementation, all data is already in self.data,
-        //  but we follow the trait contract.)
-        let mut buf = Vec::with_capacity(self.data.len());
-        buf.append(&mut self.data);
-        self.read_to_end(&mut buf).await?;
-
+    async fn recv(self) -> std::io::Result<ResponseBody> {
+        let data = if self.position == 0 {
+            self.data
+        } else {
+            self.data[self.position..].to_vec()
+        };
         Ok(ResponseBody {
-            data: buf,
+            data,
             code: self.code,
-            headers: Default::default(), // We don't parse headers in simple mode
+            headers: self.headers,
         })
     }
 }

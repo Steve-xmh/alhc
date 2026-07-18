@@ -1,61 +1,56 @@
-use futures_lite::*;
 use std::{
     pin::Pin,
-    sync::{
-        mpsc::{Receiver, TryRecvError},
-        Arc,
-    },
-    task::Poll,
+    sync::Arc,
+    task::{Context, Poll},
 };
-use windows_sys::Win32::Networking::WinHttp::{WinHttpQueryDataAvailable, WinHttpReadData};
 
-use super::{err_code::resolve_io_error, Handle, NetworkContext, WinHTTPCallbackEvent, BUF_SIZE};
-use crate::{prelude::*, ResponseBody};
+use futures_lite::{AsyncRead, AsyncReadExt};
+use windows_sys::Win32::Networking::WinHttp::WinHttpReadData;
+
+use super::{
+    err_code::{resolve_io_error, resolve_io_error_from_error_code},
+    CallbackContext, CallbackEvent, RequestHandle, BUF_SIZE,
+};
+use crate::{prelude::CommonResponse, response::HeaderMap, ResponseBody};
 
 pub struct WinHTTPResponse {
-    pub(super) _connection: Arc<Handle>,
-    pub(super) h_request: Arc<Handle>,
-    pub(super) raw_headers: String,
-    pub(super) ctx: Pin<Box<NetworkContext>>,
-    pub(super) buf: Pin<Box<[u8; BUF_SIZE]>>,
-    pub(super) read_size: usize,
-    pub(super) total_read_size: usize,
-    pub(super) callback_receiver: Receiver<WinHTTPCallbackEvent>,
+    request: Arc<RequestHandle>,
+    context: Arc<CallbackContext>,
+    raw_headers: String,
+    read_offset: usize,
+    read_length: usize,
+    read_pending: bool,
+    complete: bool,
+}
+
+impl WinHTTPResponse {
+    pub(super) fn new(
+        request: Arc<RequestHandle>,
+        context: Arc<CallbackContext>,
+        raw_headers: String,
+    ) -> Self {
+        Self {
+            request,
+            context,
+            raw_headers,
+            read_offset: 0,
+            read_length: 0,
+            read_pending: false,
+            complete: false,
+        }
+    }
 }
 
 #[cfg_attr(feature = "async_t", async_t::async_trait)]
 impl CommonResponse for WinHTTPResponse {
     async fn recv(mut self) -> std::io::Result<ResponseBody> {
-        let mut data = Vec::with_capacity(256);
+        let mut data = Vec::new();
         self.read_to_end(&mut data).await?;
-        data.shrink_to_fit();
-        let mut headers_lines = self.raw_headers.lines();
-
-        let status_code = headers_lines
-            .next()
-            .and_then(|x| x.split(' ').nth(1).map(|x| x.parse::<u16>().unwrap_or(0)))
-            .unwrap_or(0);
-
-        let mut parsed_headers: crate::response::HeaderMap = Vec::with_capacity(16);
-
-        for header in headers_lines {
-            if let Some((key, value)) = header.split_once(": ") {
-                let key = key.trim().to_owned();
-                let value = value.trim().to_owned();
-                // For duplicate headers, append with semicolon
-                if let Some(existing) = parsed_headers.iter_mut().find(|(k, _)| k == &key) {
-                    existing.1.push_str("; ");
-                    existing.1.push_str(&value);
-                } else {
-                    parsed_headers.push((key, value));
-                }
-            }
-        }
-
+        let (code, headers) = parse_headers(&self.raw_headers)?;
         Ok(ResponseBody {
             data,
-            code: status_code,
-            headers: parsed_headers,
+            code,
+            headers,
         })
     }
 }
@@ -63,74 +58,99 @@ impl CommonResponse for WinHTTPResponse {
 impl AsyncRead for WinHTTPResponse {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<futures_lite::io::Result<usize>> {
-        if self.ctx.as_mut().waker.is_none() {
-            self.ctx.as_mut().waker = Some(cx.waker().clone());
-            let r = unsafe { WinHttpQueryDataAvailable(**self.h_request, std::ptr::null_mut()) };
-            if r == 0 {
-                return Poll::Ready(Err(resolve_io_error()));
-            }
-        }
-        if self.ctx.has_completed {
+        cx: &mut Context<'_>,
+        output: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if output.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        if self.ctx.buf_size != usize::MAX && self.read_size < self.ctx.buf_size {
-            let read_size = self
-                .ctx
-                .buf_size
-                .min(buf.len())
-                .min(self.ctx.buf_size - self.read_size);
-            buf[..read_size].copy_from_slice(&self.buf[self.read_size..self.read_size + read_size]);
-            self.read_size += read_size;
-            self.total_read_size += read_size;
-            return Poll::Ready(Ok(read_size));
-        }
-        match self.callback_receiver.try_recv() {
-            Ok(event) => {
-                let result = match event {
-                    WinHTTPCallbackEvent::DataAvailable => {
-                        self.read_size = 0;
-                        self.ctx.buf_size = usize::MAX;
-                        let h_request = **self.h_request;
-                        let buf = self.buf.as_mut_slice();
-                        let r = unsafe {
-                            WinHttpReadData(
-                                h_request,
-                                buf.as_mut_ptr() as _,
-                                buf.len() as _,
-                                std::ptr::null_mut(),
-                            )
-                        };
-                        if r == 0 {
-                            return Poll::Ready(Err(resolve_io_error()));
-                        }
-                        Poll::Pending
-                    }
-                    WinHTTPCallbackEvent::DataWritten => {
-                        if self.ctx.buf_size == 0 {
-                            Poll::Ready(Ok(0))
-                        } else {
-                            let r = unsafe {
-                                WinHttpQueryDataAvailable(**self.h_request, std::ptr::null_mut())
-                            };
-                            if r == 0 {
-                                return Poll::Ready(Err(resolve_io_error()));
-                            }
-                            Poll::Pending
-                        }
-                    }
-                    WinHTTPCallbackEvent::Error(err) => Poll::Ready(Err(err)),
-                    _ => unreachable!(),
-                };
-                cx.waker().wake_by_ref();
-                result
+
+        loop {
+            if self.read_offset < self.read_length {
+                let length = (self.read_length - self.read_offset).min(output.len());
+                unsafe {
+                    let source = std::slice::from_raw_parts(
+                        self.context.buffer_ptr().add(self.read_offset),
+                        length,
+                    );
+                    output[..length].copy_from_slice(source);
+                }
+                self.read_offset += length;
+                return Poll::Ready(Ok(length));
             }
-            Err(TryRecvError::Empty) => Poll::Pending,
-            Err(TryRecvError::Disconnected) => {
-                Poll::Ready(Err(std::io::Error::other("channel has been disconnected")))
+            if self.complete {
+                return Poll::Ready(Ok(0));
+            }
+
+            if !self.read_pending {
+                let result = unsafe {
+                    WinHttpReadData(
+                        self.request.raw(),
+                        self.context.buffer_ptr().cast(),
+                        BUF_SIZE as u32,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if result == 0 {
+                    return Poll::Ready(Err(resolve_io_error()));
+                }
+                self.read_pending = true;
+            }
+
+            match self.context.poll_event(cx.waker()) {
+                Some(CallbackEvent::ReadComplete(0)) => {
+                    self.read_pending = false;
+                    self.complete = true;
+                }
+                Some(CallbackEvent::ReadComplete(length)) if length <= BUF_SIZE => {
+                    self.read_pending = false;
+                    self.read_offset = 0;
+                    self.read_length = length;
+                }
+                Some(CallbackEvent::ReadComplete(_)) => {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "WinHTTP reported an invalid read length",
+                    )));
+                }
+                Some(CallbackEvent::Error(code)) => {
+                    return Poll::Ready(Err(resolve_io_error_from_error_code(code)));
+                }
+                Some(_) => continue,
+                None => return Poll::Pending,
             }
         }
     }
+}
+
+fn parse_headers(raw: &str) -> std::io::Result<(u16, HeaderMap)> {
+    let mut lines = raw.lines();
+    let status = lines.next().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "HTTP response has no status line",
+        )
+    })?;
+    let code = status
+        .split_ascii_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP response has an invalid status line",
+            )
+        })?;
+
+    let mut headers = HeaderMap::new();
+    for line in lines {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            headers.push((name.trim().to_owned(), value.trim().to_owned()));
+        }
+    }
+    Ok((code, headers))
 }
